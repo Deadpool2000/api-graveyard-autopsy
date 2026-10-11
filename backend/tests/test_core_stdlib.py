@@ -174,6 +174,32 @@ class TestCoreParsersAndNormalizer(unittest.TestCase):
         self.assertIn(("GET", "/api/v1/legacy/accounts"), route_pairs)
         self.assertNotIn(("DELETE", "/api/v2/users/{param}/gdpr-erase"), route_pairs)
 
+    def test_specless_external_api_endpoint_url_scan(self) -> None:
+        def fake_frankfurter_requester(
+            method: str, url: str, headers: dict[str, str], timeout: float
+        ) -> tuple[int, bytes]:
+            if url.endswith("/latest") and method == "GET":
+                return 200, b'{"amount":1.0,"base":"EUR","date":"2026-10-10","rates":{"USD":1.09}}'
+            if url.endswith("/currencies") and method == "GET":
+                return 200, b'{"EUR":"Euro","USD":"United States Dollar"}'
+            return 404, b'{"message":"not found"}'
+
+        res = collect_live_api_sources(
+            target_base_url="https://api.frankfurter.app/latest",
+            openapi_path="/openapi.json",
+            probe_endpoints=True,
+            include_shadow_wordlist=True,
+            requester=fake_frankfurter_requester,
+        )
+
+        self.assertEqual(res.resolved_base_url, "https://api.frankfurter.app")
+        self.assertTrue(res.openapi_filename.startswith("no-public-openapi"))
+        parsed_routes = parse_routes_content(res.routes_bytes, filename="routes.json")
+        route_pairs = {(r.method, r.normalized_path) for r in parsed_routes.routes}
+        self.assertIn(("GET", "/latest"), route_pairs)
+        self.assertIn(("GET", "/currencies"), route_pairs)
+        self.assertIsNotNone(res.logs_bytes)
+
     def test_sqlite_schema_and_wal_persistence(self) -> None:
         from app.config import get_settings
 
