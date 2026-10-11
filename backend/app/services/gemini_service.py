@@ -536,6 +536,8 @@ def generate_deterministic_executive_summary(
 
 
 FALLBACK_GEMINI_MODELS = [
+    "gemma-4-31b-it",
+    "gemma-4-26b-a4b-it",
     "gemini-3.8-flash",
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
@@ -543,12 +545,29 @@ FALLBACK_GEMINI_MODELS = [
 ]
 
 
+def _extract_json_text(raw_text: str) -> str:
+    """Strip optional Markdown code fences if an open-weight model wraps JSON output."""
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
 def _call_gemini_structured(
     prompt: str,
     schema_cls: Type[T],
 ) -> Tuple[Optional[T], Optional[str]]:
     """
-    Invoke Google Gemini API with timeout, structured JSON schema validation, model fallback, and rate-limit handling.
+    Invoke Google Gemini / Gemma 4 API with timeout, structured JSON schema validation, model fallback, and rate-limit handling.
     Returns (validated_model_or_None, error_message_or_None).
     """
     settings = get_settings()
@@ -571,20 +590,46 @@ def _call_gemini_structured(
             api_key=settings.gemini_api_key,
             http_options=types.HttpOptions(timeout=settings.gemini_timeout_seconds * 1000),
         )
-        response = client.models.generate_content(
-            model=model_name,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION,
-                response_mime_type="application/json",
-                response_schema=schema_cls,
-                temperature=0.1,
-                max_output_tokens=max(4096, settings.gemini_max_output_tokens),
-            ),
-        )
-        raw_text = (response.text or "").strip()
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json",
+                    response_schema=schema_cls,
+                    temperature=0.1,
+                    max_output_tokens=max(4096, settings.gemini_max_output_tokens),
+                ),
+            )
+        except Exception as inner_exc:
+            err_msg = str(inner_exc).lower()
+            # Some Gemma endpoints in Google AI Studio do not accept developer/system instructions or response_mime_type
+            if any(
+                kw in err_msg
+                for kw in ("developer instruction", "system_instruction", "response_mime_type", "json mode", "response_schema")
+            ):
+                schema_json = json.dumps(schema_cls.model_json_schema(), indent=2)
+                combined_prompt = (
+                    f"{SYSTEM_INSTRUCTION.strip()}\n\n"
+                    f"REQUIRED_JSON_SCHEMA:\n{schema_json}\n\n"
+                    f"{prompt}\n\n"
+                    "Respond ONLY with valid JSON conforming to REQUIRED_JSON_SCHEMA."
+                )
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=combined_prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        max_output_tokens=max(4096, settings.gemini_max_output_tokens),
+                    ),
+                )
+            else:
+                raise
+
+        raw_text = _extract_json_text(response.text or "")
         if not raw_text:
-            raise ValueError("Empty response received from Gemini API.")
+            raise ValueError("Empty response received from Gemini/Gemma API.")
         return schema_cls.model_validate_json(raw_text)
 
     last_exc: Optional[Exception] = None

@@ -72,7 +72,7 @@ class Settings:
             return file_val or env_val or default
 
         self.gemini_api_key: str = get_val("GEMINI_API_KEY", "")
-        self.gemini_model: str = get_val("GEMINI_MODEL", "gemini-3.8-flash")
+        self.gemini_model: str = get_val("GEMINI_MODEL", "gemma-4-31b-it")
         self.gemini_enabled: bool = get_val("GEMINI_ENABLED", "true").lower() in ("1", "true", "yes", "on")
         try:
             self.gemini_timeout_seconds: int = max(3, min(60, int(get_val("GEMINI_TIMEOUT_SECONDS", "35"))))
