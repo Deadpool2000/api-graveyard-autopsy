@@ -1,12 +1,17 @@
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional, Tuple
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_ENV_FILE = REPO_ROOT / ".env"
+DOCKER_ENV_FILE = Path("/app/.env")
+FALLBACK_ENV_EXAMPLE = REPO_ROOT / ".env.example"
 
 PLACEHOLDER_KEYS = {
     "",
     "replace_me",
     "your_api_key_here",
+    "your_actual_gemini_api_key_here",
     "your_gemini_api_key",
     "changeme",
     "none",
@@ -14,48 +19,57 @@ PLACEHOLDER_KEYS = {
 }
 
 
-def _read_dotenv_values() -> dict[str, str]:
-    """Read key-value pairs from .env file dynamically if present on disk."""
+def resolve_env_file_path() -> Optional[Path]:
+    """Resolve the active .env file path (ENV_FILE_PATH override, repo .env, or Docker /app/.env)."""
     candidates = [
-        os.environ.get("ENV_FILE_PATH", ""),
-        "/app/.env",
-        str(Path(__file__).resolve().parents[2] / ".env"),
+        os.environ.get("ENV_FILE_PATH", "").strip(),
+        str(DEFAULT_ENV_FILE),
+        str(DOCKER_ENV_FILE),
     ]
-    values: dict[str, str] = {}
     for candidate in candidates:
         if not candidate:
             continue
         path = Path(candidate)
         if path.is_file():
-            try:
-                for raw_line in path.read_text(encoding="utf-8").splitlines():
-                    line = raw_line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, val = line.split("=", 1)
-                    key = key.strip()
-                    val = val.strip().strip("'").strip('"')
-                    values[key] = val
-                break
-            except Exception:
-                continue
-    return values
+            return path
+    return None
+
+
+def _read_dotenv_values() -> Tuple[dict[str, str], Optional[Path]]:
+    """Read key-value pairs from the linked .env file dynamically if present on disk."""
+    env_path = resolve_env_file_path()
+    values: dict[str, str] = {}
+    if env_path is not None:
+        try:
+            for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, val = line.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip("'").strip('"')
+                values[key] = val
+        except Exception:
+            pass
+    return values, env_path
 
 
 class Settings:
-    """Server-side application configuration. Never exposes secret keys."""
+    """Server-side application configuration linked to .env. Never exposes secret keys."""
 
     def __init__(self) -> None:
-        dotenv_vals = _read_dotenv_values()
+        dotenv_vals, resolved_path = _read_dotenv_values()
+        self.env_file_path: Optional[str] = str(resolved_path) if resolved_path else None
+        self.has_env_file: bool = resolved_path is not None
 
         def get_val(name: str, default: str) -> str:
+            file_val = dotenv_vals.get(name, "").strip()
             env_val = os.environ.get(name, "").strip()
+            if file_val and file_val.lower() not in PLACEHOLDER_KEYS:
+                return file_val
             if env_val and env_val.lower() not in PLACEHOLDER_KEYS:
                 return env_val
-            file_val = dotenv_vals.get(name, "").strip()
-            if file_val:
-                return file_val
-            return env_val or default
+            return file_val or env_val or default
 
         self.gemini_api_key: str = get_val("GEMINI_API_KEY", "")
         self.gemini_model: str = get_val("GEMINI_MODEL", "gemini-2.5-flash")
@@ -110,7 +124,7 @@ class Settings:
         env_dir = os.environ.get("SAMPLE_DATA_DIR", "")
         if env_dir and Path(env_dir).is_dir():
             return Path(env_dir)
-        repo_sample = Path(__file__).resolve().parents[2] / "sample-data"
+        repo_sample = REPO_ROOT / "sample-data"
         if repo_sample.is_dir():
             return repo_sample
         local_sample = Path(__file__).resolve().parents[1] / "sample-data"
@@ -118,6 +132,7 @@ class Settings:
 
 
 def get_settings() -> Settings:
-    """Return fresh settings instance so updates to .env are picked up immediately."""
+    """Return fresh settings instance linked to .env so updates are picked up immediately."""
     return Settings()
+
 

@@ -49,10 +49,19 @@ class TestCoreParsersAndNormalizer(unittest.TestCase):
         self.assertEqual(matched_id, "/api/v1/users/{param}")
 
     def test_sensitive_token_redaction(self) -> None:
-        redacted, changed = redact_sensitive_text("/api/v1/users?access_token=secret123")
+        redacted, changed = redact_sensitive_text("/api/v1/users?access_token=sample_query_token")
         self.assertTrue(changed)
-        self.assertNotIn("secret123", redacted)
+        self.assertNotIn("sample_query_token", redacted)
         self.assertIn("[REDACTED]", redacted)
+
+    def test_env_file_linking(self) -> None:
+        from app.config import DEFAULT_ENV_FILE, FALLBACK_ENV_EXAMPLE, get_settings
+
+        self.assertTrue(DEFAULT_ENV_FILE.is_file() or FALLBACK_ENV_EXAMPLE.is_file())
+        settings = get_settings()
+        if DEFAULT_ENV_FILE.is_file():
+            self.assertTrue(settings.has_env_file)
+            self.assertEqual(settings.env_file_path, str(DEFAULT_ENV_FILE))
 
     def test_invalid_openapi_raises_clear_error(self) -> None:
         with self.assertRaises(OpenAPIParseError):

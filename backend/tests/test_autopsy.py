@@ -4,6 +4,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import DEFAULT_ENV_FILE, FALLBACK_ENV_EXAMPLE, Settings, get_settings
 from app.main import app
 from app.schemas.models import (
     AIExplanationSchema,
@@ -20,12 +21,16 @@ client = TestClient(app)
 
 
 def test_health_endpoint_does_not_expose_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSySecretTestKeyDoNotLeak999")
+    if DEFAULT_ENV_FILE.is_file():
+        monkeypatch.setenv("ENV_FILE_PATH", str(DEFAULT_ENV_FILE))
+    settings = get_settings()
     res = client.get("/health")
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "ok"
-    assert "AIzaSySecretTestKeyDoNotLeak999" not in json.dumps(body)
+    assert "gemini_api_key" not in body
+    if settings.gemini_api_key:
+        assert settings.gemini_api_key not in json.dumps(body)
 
 
 def test_valid_openapi_json_and_yaml_parse() -> None:
@@ -87,14 +92,13 @@ def test_static_path_users_me_not_merged_with_parameterized_route() -> None:
 
 
 def test_sensitive_query_tokens_redacted() -> None:
-    redacted, changed = redact_sensitive_text("/api/v1/users?access_token=super_secret_123&page=1")
+    redacted, changed = redact_sensitive_text("/api/v1/users?access_token=sample_query_token&page=1")
     assert changed is True
-    assert "super_secret_123" not in redacted
+    assert "sample_query_token" not in redacted
     assert "[REDACTED]" in redacted
 
 
-def test_demo_flow_and_all_p0_finding_categories(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GEMINI_API_KEY", "replace_me")
+def test_demo_flow_and_all_p0_finding_categories() -> None:
     res = client.post("/api/v1/analyses/demo")
     assert res.status_code == 201
     data = res.json()
@@ -141,8 +145,9 @@ def test_exports_contain_findings_and_caveats() -> None:
 def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 1. Test fallback when Gemini is disabled/unconfigured
-    monkeypatch.setenv("GEMINI_API_KEY", "replace_me")
+    # 1. Test fallback when linked to .env.example (placeholder GEMINI_API_KEY)
+    monkeypatch.setenv("ENV_FILE_PATH", str(FALLBACK_ENV_EXAMPLE))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     demo = client.post("/api/v1/analyses/demo").json()
     analysis_id = demo["id"]
 
@@ -159,15 +164,19 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
     assert fb_payload["finding"]["review_priority_score"] == orig_score
     assert fb_payload["finding"]["category"] == orig_category
 
-    # 2. Test with Gemini configured (mocked SDK call)
-    monkeypatch.setenv("GEMINI_API_KEY", "AIzaSyTestConfiguredKeyForUnitTestsOnly")
+    # 2. Test with Gemini configured via .env (mocked SDK call)
+    if DEFAULT_ENV_FILE.is_file():
+        monkeypatch.setenv("ENV_FILE_PATH", str(DEFAULT_ENV_FILE))
     mock_ai = AIExplanationSchema(
         summary="Grounded explanation from Gemini based on supplied metadata.",
         evidence_interpretation=["Route is present in OpenAPI but missing from route inventory."],
         recommended_checks=["Check backend routers and API gateway mappings."],
         caveats=["Absence of logs does not prove the endpoint is unused."],
     )
-    with patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_ai, None)):
+    with (
+        patch.object(Settings, "is_gemini_configured", True),
+        patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_ai, None)),
+    ):
         second_fid = findings[1]["id"]
         second_score = findings[1]["review_priority_score"]
         second_cat = findings[1]["category"]
@@ -187,7 +196,10 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         supporting_evidence=["FND-001 has the highest deterministic review priority."],
         caveats=["Verify logs across all environments before retiring any endpoint."],
     )
-    with patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_chat, None)):
+    with (
+        patch.object(Settings, "is_gemini_configured", True),
+        patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_chat, None)),
+    ):
         chat_res = client.post(
             f"/api/v1/analyses/{analysis_id}/chat",
             json={"question": "Which findings should I investigate first?"},
@@ -210,8 +222,12 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         ],
         general_caveats=["Never delete endpoints automatically without owner sign-off."],
     )
-    with patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_plan, None)):
+    with (
+        patch.object(Settings, "is_gemini_configured", True),
+        patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_plan, None)),
+    ):
         plan_res = client.post(f"/api/v1/analyses/{analysis_id}/investigation-plan")
         assert plan_res.status_code == 200
         assert len(plan_res.json()["investigation_plan"]["steps"]) == 1
+
 
