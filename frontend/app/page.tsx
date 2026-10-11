@@ -3,10 +3,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
-  AlertTriangle,
   Loader2,
   Search,
-  SlidersHorizontal,
   X,
 } from "lucide-react";
 import {
@@ -14,7 +12,6 @@ import {
   createCustomAnalysis,
   fetchAnalysis,
   fetchFindings,
-  fetchServiceStatus,
   generateExecutiveSummary,
   generateInvestigationPlan,
   investigateFinding,
@@ -30,7 +27,7 @@ import {
 import {
   MethodBadge,
   SourceMatrixPills,
-  getSeverityDot,
+  getSeverityStyle,
 } from "@/components/Badges";
 import { ActiveTab, Header } from "@/components/Header";
 import { UploadAndLanding } from "@/components/UploadAndLanding";
@@ -54,14 +51,6 @@ const CATEGORIES = [
 const HTTP_METHODS = ["all", "GET", "POST", "PUT", "PATCH", "DELETE"];
 
 export default function AutopsyWorkbench() {
-  const [aiStatus, setAiStatus] = useState<{
-    enabled: boolean;
-    configured: boolean;
-    provider: string;
-    model: string | null;
-  } | null>(null);
-  const [redisConnected, setRedisConnected] = useState<boolean>(false);
-
   // Analysis & workspace state
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [findings, setFindings] = useState<Finding[]>([]);
@@ -84,7 +73,6 @@ export default function AutopsyWorkbench() {
   const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [selectedMethod, setSelectedMethod] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [minScore, setMinScore] = useState<number>(0);
 
   // Interactive human verification checklist
   const [checkedSteps, setCheckedSteps] = useState<Record<string, boolean>>({});
@@ -105,15 +93,6 @@ export default function AutopsyWorkbench() {
   const [isAskingChat, setIsAskingChat] = useState<boolean>(false);
   const [chatHistory, setChatHistory] = useState<ChatResponseRecord[]>([]);
 
-  useEffect(() => {
-    fetchServiceStatus()
-      .then((data) => {
-        setAiStatus(data.ai);
-        setRedisConnected(data.redis_connected);
-      })
-      .catch(() => {});
-  }, []);
-
   // Poll job status if queued or processing
   useEffect(() => {
     if (!analysis) return;
@@ -125,16 +104,6 @@ export default function AutopsyWorkbench() {
       try {
         const updated = await fetchAnalysis(analysis.id);
         setAnalysis(updated);
-        if (updated.ai_status) {
-          setAiStatus({
-            enabled: Boolean(updated.ai_status.enabled),
-            configured: Boolean(updated.ai_status.configured),
-            provider: String(updated.ai_status.provider || ""),
-            model: updated.ai_status.model
-              ? String(updated.ai_status.model)
-              : null,
-          });
-        }
         if (updated.status === "completed") {
           const fRes = await fetchFindings(updated.id);
           setFindings(fRes.findings);
@@ -155,6 +124,16 @@ export default function AutopsyWorkbench() {
     return () => clearInterval(timer);
   }, [analysis, selectedFindingId]);
 
+  const handleGoHome = () => {
+    setAnalysis(null);
+    setFindings([]);
+    setSelectedFindingId(null);
+    setMobileInspectorOpen(false);
+    setUploadModalOpen(false);
+    setErrorBanner(null);
+    setActiveTab("findings");
+  };
+
   const handleLoadDemo = async () => {
     setErrorBanner(null);
     setIsStartingAnalysis(true);
@@ -164,20 +143,11 @@ export default function AutopsyWorkbench() {
     setSelectedCategory("all");
     setSelectedMethod("all");
     setSearchQuery("");
-    setMinScore(0);
     setActiveTab("findings");
 
     try {
       const demo = await startDemoAnalysis();
       setAnalysis(demo);
-      if (demo.ai_status) {
-        setAiStatus({
-          enabled: Boolean(demo.ai_status.enabled),
-          configured: Boolean(demo.ai_status.configured),
-          provider: String(demo.ai_status.provider || ""),
-          model: demo.ai_status.model ? String(demo.ai_status.model) : null,
-        });
-      }
       if (demo.status === "completed") {
         const fRes = await fetchFindings(demo.id);
         setFindings(fRes.findings);
@@ -199,7 +169,7 @@ export default function AutopsyWorkbench() {
 
     if (!openapiFile && !routesFile && !logsFile) {
       setErrorBanner(
-        "Upload at least one source file (OpenAPI spec, route inventory, or request logs)."
+        "Upload at least one source file (OpenAPI spec, backend routes, or traffic logs)."
       );
       return;
     }
@@ -211,7 +181,6 @@ export default function AutopsyWorkbench() {
     setSelectedCategory("all");
     setSelectedMethod("all");
     setSearchQuery("");
-    setMinScore(0);
     setActiveTab("findings");
 
     try {
@@ -253,9 +222,6 @@ export default function AutopsyWorkbench() {
       ) {
         return false;
       }
-      if (f.review_priority_score < minScore) {
-        return false;
-      }
       if (searchQuery.trim()) {
         const q = searchQuery.trim().toLowerCase();
         const hay = `${f.id} ${f.method} ${f.path} ${f.category} ${f.evidence.join(
@@ -265,7 +231,7 @@ export default function AutopsyWorkbench() {
       }
       return true;
     });
-  }, [findings, selectedCategory, selectedMethod, minScore, searchQuery]);
+  }, [findings, selectedCategory, selectedMethod, searchQuery]);
 
   const selectedFinding = useMemo(() => {
     if (!selectedFindingId) return filteredFindings[0] || null;
@@ -285,7 +251,6 @@ export default function AutopsyWorkbench() {
     setSelectedCategory("all");
     setSelectedMethod("all");
     setSearchQuery("");
-    setMinScore(0);
     setSelectedFindingId(fid);
     setActiveTab("findings");
     setMobileInspectorOpen(true);
@@ -369,39 +334,44 @@ export default function AutopsyWorkbench() {
     setCheckedSteps((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const hasActiveFilters =
+    selectedCategory !== "all" ||
+    selectedMethod !== "all" ||
+    searchQuery.trim() !== "";
+
   return (
     <div className="min-h-screen flex flex-col bg-[#0a0a0c] text-zinc-200">
       <Header
         analysis={analysis}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        aiStatus={aiStatus}
-        redisConnected={redisConnected}
         isStartingAnalysis={isStartingAnalysis}
         onLoadDemo={handleLoadDemo}
         onOpenUploadModal={() => setUploadModalOpen(true)}
+        onGoHome={handleGoHome}
       />
 
-      <main className="flex-1 max-w-[1600px] w-full mx-auto px-3 sm:px-6 py-5 space-y-4">
+      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
         {/* Error Banner */}
         {errorBanner && (
-          <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 flex items-center justify-between gap-3 text-xs text-rose-200">
-            <div className="flex items-center gap-2.5">
-              <AlertCircle className="h-4 w-4 text-rose-400 shrink-0" />
+          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3.5 flex items-center justify-between gap-3 text-sm text-rose-200">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-rose-400 shrink-0" />
               <span>{errorBanner}</span>
             </div>
             <button
+              type="button"
               onClick={() => setErrorBanner(null)}
               className="text-rose-300 hover:text-white p-1"
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="h-4 w-4" />
             </button>
           </div>
         )}
 
         {/* Upload Modal when an analysis is already open */}
         {uploadModalOpen && analysis && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
             <div className="w-full max-w-4xl my-auto">
               <UploadAndLanding
                 isModal
@@ -442,24 +412,24 @@ export default function AutopsyWorkbench() {
         {/* Progress State (Queued / Processing) */}
         {analysis &&
           (analysis.status === "queued" || analysis.status === "processing") && (
-            <div className="rounded-lg border border-zinc-800 bg-[#111113] p-6 max-w-2xl mx-auto space-y-4">
+            <div className="rounded-xl border border-zinc-800 bg-[#111113] p-8 max-w-2xl mx-auto space-y-4">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <Loader2 className="h-4 w-4 text-zinc-300 animate-spin" />
+                  <Loader2 className="h-5 w-5 text-zinc-300 animate-spin" />
                   <div>
-                    <div className="text-sm font-medium text-zinc-100">
-                      Processing {analysis.name}
+                    <div className="text-base font-medium text-white">
+                      Analyzing {analysis.name}...
                     </div>
-                    <div className="text-xs font-mono text-zinc-400 uppercase mt-0.5">
-                      Stage: {analysis.stage}
+                    <div className="text-sm text-zinc-400 capitalize mt-0.5">
+                      Step: {analysis.stage}
                     </div>
                   </div>
                 </div>
-                <span className="text-xs font-mono tabular-nums text-zinc-300">
+                <span className="text-sm font-mono tabular-nums text-zinc-300">
                   {analysis.progress_percent}%
                 </span>
               </div>
-              <div className="w-full h-1.5 rounded-full bg-zinc-900 overflow-hidden">
+              <div className="w-full h-2 rounded-full bg-zinc-900 overflow-hidden">
                 <div
                   className="h-full bg-zinc-200 transition-all duration-300"
                   style={{ width: `${analysis.progress_percent}%` }}
@@ -471,327 +441,198 @@ export default function AutopsyWorkbench() {
         {/* Completed Analysis Workspace */}
         {analysis && analysis.status === "completed" && analysis.summary && (
           <>
-            {/* Tab 1: Findings & Evidence Workspace */}
+            {/* Tab 1: Findings Workspace */}
             {activeTab === "findings" && (
-              <div className="space-y-4">
-                {/* Compact Telemetry & Source Summary Strip */}
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                  <div className="rounded-md border border-zinc-800/90 bg-[#111113] px-3.5 py-2.5">
-                    <div className="text-[11px] text-zinc-400">
-                      Declared (OpenAPI)
+              <div className="space-y-5">
+                {/* Clean 4-Card Summary Bar */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="rounded-xl border border-zinc-800/90 bg-[#111113] p-4">
+                    <div className="text-sm text-zinc-400">Flagged Issues</div>
+                    <div className="text-2xl font-semibold text-white tabular-nums mt-1">
+                      {analysis.summary.total_findings}
                     </div>
-                    <div className="text-lg font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">
+                  </div>
+
+                  <div className="rounded-xl border border-zinc-800/90 bg-[#111113] p-4">
+                    <div className="text-sm text-zinc-400">Documented (OpenAPI)</div>
+                    <div className="text-2xl font-semibold text-white tabular-nums mt-1">
                       {analysis.summary.openapi_endpoint_count}
                     </div>
                   </div>
 
-                  <div className="rounded-md border border-zinc-800/90 bg-[#111113] px-3.5 py-2.5">
-                    <div className="text-[11px] text-zinc-400">
-                      Implemented (Routes)
-                    </div>
-                    <div className="text-lg font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">
+                  <div className="rounded-xl border border-zinc-800/90 bg-[#111113] p-4">
+                    <div className="text-sm text-zinc-400">Implemented (Routes)</div>
+                    <div className="text-2xl font-semibold text-white tabular-nums mt-1">
                       {analysis.summary.routes_endpoint_count}
                     </div>
                   </div>
 
-                  <div className="rounded-md border border-zinc-800/90 bg-[#111113] px-3.5 py-2.5">
-                    <div className="text-[11px] text-zinc-400">
-                      Observed (Logs)
-                    </div>
-                    <div className="flex items-baseline gap-1.5 mt-0.5">
-                      <span className="text-lg font-mono font-semibold text-zinc-100 tabular-nums">
+                  <div className="rounded-xl border border-zinc-800/90 bg-[#111113] p-4">
+                    <div className="text-sm text-zinc-400">Seen in Traffic Logs</div>
+                    <div className="flex items-baseline gap-2 mt-1">
+                      <span className="text-2xl font-semibold text-white tabular-nums">
                         {analysis.summary.logs_endpoint_count}
                       </span>
-                      <span className="text-[11px] font-mono text-zinc-500">
-                        ({analysis.summary.total_log_requests} reqs)
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="rounded-md border border-zinc-800/90 bg-[#111113] px-3.5 py-2.5">
-                    <div className="text-[11px] text-zinc-400">
-                      Unique Surface
-                    </div>
-                    <div className="text-lg font-mono font-semibold text-zinc-100 tabular-nums mt-0.5">
-                      {analysis.summary.total_unique_endpoints}
-                    </div>
-                  </div>
-
-                  <div className="rounded-md border border-zinc-800/90 bg-[#111113] px-3.5 py-2.5 col-span-2 sm:col-span-1">
-                    <div className="text-[11px] text-zinc-400">
-                      Flagged Findings
-                    </div>
-                    <div className="flex items-baseline justify-between gap-2 mt-0.5">
-                      <span className="text-lg font-mono font-semibold text-zinc-100 tabular-nums">
-                        {analysis.summary.total_findings}
-                      </span>
-                      <span className="text-[11px] font-mono text-zinc-500">
-                        {analysis.summary.observation_window_days !== null
-                          ? `${analysis.summary.observation_window_days}d window`
-                          : "No window"}
+                      <span className="text-xs text-zinc-400">
+                        ({analysis.summary.total_log_requests} requests)
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Category Quick-Filter Pills + Guardrail Notice */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                  <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0 max-w-full">
-                    <button
-                      onClick={() => setSelectedCategory("all")}
-                      className={`px-2.5 py-1 rounded text-xs font-medium whitespace-nowrap border transition ${
-                        selectedCategory === "all"
-                          ? "bg-zinc-100 text-zinc-950 border-zinc-100"
-                          : "bg-[#111113] text-zinc-400 border-zinc-800 hover:text-zinc-200"
-                      }`}
-                    >
-                      All ({findings.length})
-                    </button>
-                    {Object.entries(analysis.summary.findings_by_category).map(
-                      ([cat, count]) => {
-                        const active = selectedCategory === cat;
-                        return (
-                          <button
-                            key={cat}
-                            onClick={() =>
-                              setSelectedCategory(active ? "all" : cat)
-                            }
-                            className={`px-2.5 py-1 rounded text-xs whitespace-nowrap border transition ${
-                              active
-                                ? "bg-zinc-100 text-zinc-950 border-zinc-100 font-medium"
-                                : "bg-[#111113] text-zinc-400 border-zinc-800 hover:text-zinc-200"
-                            }`}
-                          >
-                            {cat}{" "}
-                            <span className="font-mono text-[11px] opacity-75">
-                              ({count})
-                            </span>
-                          </button>
-                        );
-                      }
-                    )}
-                  </div>
-
-                  <div className="hidden xl:flex items-center gap-1.5 text-[11px] text-zinc-400">
-                    <AlertTriangle className="h-3.5 w-3.5 text-amber-400" />
-                    <span>
-                      &ldquo;Not observed&rdquo; means absent from log sample,
-                      not safe to delete.
-                    </span>
-                  </div>
-                </div>
-
-                {/* Search & Filter Toolbar */}
-                <div className="rounded-lg border border-zinc-800 bg-[#111113] p-3 flex flex-col md:flex-row md:items-center justify-between gap-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2.5 flex-1">
+                {/* Single Clean Filter Toolbar */}
+                <div className="rounded-xl border border-zinc-800 bg-[#111113] p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                  <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-1">
                     {/* Search Input */}
                     <div className="relative flex-1 max-w-md">
-                      <Search className="h-3.5 w-3.5 text-zinc-500 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <Search className="h-4 w-4 text-zinc-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
                         value={searchQuery}
                         onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Filter by path (/users), ID (FND-001), or evidence..."
-                        className="w-full rounded-md bg-zinc-950 border border-zinc-800 pl-8 pr-7 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-zinc-600"
+                        placeholder="Search endpoints (e.g. /users)..."
+                        className="w-full rounded-lg bg-zinc-950 border border-zinc-800 pl-10 pr-8 py-2 text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-zinc-600"
                       />
                       {searchQuery && (
                         <button
+                          type="button"
                           onClick={() => setSearchQuery("")}
                           className="absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
                         >
-                          <X className="h-3.5 w-3.5" />
+                          <X className="h-4 w-4" />
                         </button>
                       )}
                     </div>
 
-                    {/* Method Pills */}
-                    <div className="flex items-center gap-1 overflow-x-auto">
+                    {/* Issue Category Dropdown */}
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-3.5 py-2 text-sm text-zinc-200 focus:outline-none focus:border-zinc-600"
+                    >
+                      <option value="all">
+                        All Issue Types ({findings.length})
+                      </option>
+                      {CATEGORIES.filter((c) => c !== "all").map((cat) => {
+                        const count =
+                          analysis.summary?.findings_by_category[cat] ?? 0;
+                        if (count === 0) return null;
+                        return (
+                          <option key={cat} value={cat}>
+                            {cat} ({count})
+                          </option>
+                        );
+                      })}
+                    </select>
+
+                    {/* HTTP Method Dropdown */}
+                    <select
+                      value={selectedMethod}
+                      onChange={(e) => setSelectedMethod(e.target.value)}
+                      className="rounded-lg bg-zinc-950 border border-zinc-800 px-3.5 py-2 text-sm text-zinc-200 focus:outline-none focus:border-zinc-600"
+                    >
                       {HTTP_METHODS.map((m) => (
-                        <button
-                          key={m}
-                          onClick={() => setSelectedMethod(m)}
-                          className={`px-2 py-1 rounded text-[11px] font-mono uppercase border transition ${
-                            selectedMethod === m
-                              ? "bg-zinc-800 text-zinc-100 border-zinc-600"
-                              : "bg-zinc-950 text-zinc-500 border-zinc-800/80 hover:text-zinc-300"
-                          }`}
-                        >
-                          {m}
-                        </button>
+                        <option key={m} value={m}>
+                          {m === "all" ? "All Methods" : m}
+                        </option>
                       ))}
-                    </div>
+                    </select>
                   </div>
 
-                  {/* Priority Slider & Count */}
-                  <div className="flex items-center justify-between sm:justify-end gap-4 border-t md:border-t-0 border-zinc-800/80 pt-2 md:pt-0 text-xs">
-                    <div className="flex items-center gap-2 text-zinc-400">
-                      <SlidersHorizontal className="h-3.5 w-3.5 text-zinc-500" />
-                      <span>Min Priority:</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={90}
-                        step={5}
-                        value={minScore}
-                        onChange={(e) => setMinScore(Number(e.target.value))}
-                        className="w-20 accent-zinc-200 cursor-pointer"
-                      />
-                      <span className="font-mono text-zinc-200 tabular-nums w-6">
-                        {minScore}
-                      </span>
-                    </div>
-
-                    <span className="text-[11px] font-mono text-zinc-500 tabular-nums">
-                      {filteredFindings.length}/{findings.length} shown
+                  <div className="flex items-center justify-between sm:justify-end gap-3 text-sm text-zinc-400">
+                    {hasActiveFilters && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedCategory("all");
+                          setSelectedMethod("all");
+                          setSearchQuery("");
+                        }}
+                        className="text-sm text-zinc-300 underline hover:text-white"
+                      >
+                        Reset
+                      </button>
+                    )}
+                    <span>
+                      Showing <strong className="text-zinc-200">{filteredFindings.length}</strong> of{" "}
+                      {findings.length}
                     </span>
                   </div>
                 </div>
 
-                {/* Split View: Findings List (Left 7 cols) + Sticky Desktop Inspector (Right 5 cols) */}
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+                {/* Split View: Findings List (Left 7 cols) + Inspector (Right 5 cols) */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
                   {/* Left: Findings List */}
-                  <div className="lg:col-span-7 rounded-lg border border-zinc-800 bg-[#111113] overflow-hidden">
+                  <div className="lg:col-span-7 rounded-xl border border-zinc-800 bg-[#111113] overflow-hidden">
                     {filteredFindings.length === 0 ? (
-                      <div className="p-10 text-center space-y-2">
-                        <p className="text-xs text-zinc-400">
-                          No findings match the active filter criteria.
+                      <div className="p-12 text-center space-y-3">
+                        <p className="text-base text-zinc-300">
+                          No endpoints match your current filters.
                         </p>
                         <button
+                          type="button"
                           onClick={() => {
                             setSelectedCategory("all");
                             setSelectedMethod("all");
                             setSearchQuery("");
-                            setMinScore(0);
                           }}
-                          className="text-xs text-zinc-200 underline hover:text-white"
+                          className="text-sm text-zinc-200 underline hover:text-white"
                         >
-                          Clear filters
+                          Clear all filters
                         </button>
                       </div>
                     ) : (
-                      <>
-                        {/* Desktop Table Header */}
-                        <div className="hidden sm:grid sm:grid-cols-12 gap-2 px-4 py-2.5 border-b border-zinc-800 bg-zinc-950/60 text-[11px] font-mono text-zinc-500 uppercase">
-                          <div className="col-span-5">Endpoint</div>
-                          <div className="col-span-3">Category</div>
-                          <div className="col-span-3">Sources</div>
-                          <div className="col-span-1 text-right">Priority</div>
-                        </div>
-
-                        <div className="divide-y divide-zinc-800/70">
-                          {filteredFindings.map((f) => {
-                            const isSelected = selectedFinding?.id === f.id;
-                            return (
-                              <div
-                                key={f.id}
-                                onClick={() => handleSelectFinding(f.id)}
-                                className={`px-3.5 sm:px-4 py-3 cursor-pointer transition ${
-                                  isSelected
-                                    ? "bg-zinc-800/65"
-                                    : "hover:bg-zinc-900/60"
-                                }`}
-                              >
-                                {/* Desktop Row Layout */}
-                                <div className="hidden sm:grid sm:grid-cols-12 gap-2 items-center">
-                                  <div className="col-span-5 min-w-0 space-y-1">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <MethodBadge method={f.method} />
-                                      <span className="font-mono text-xs text-zinc-100 truncate font-medium">
-                                        {f.path}
-                                      </span>
-                                    </div>
-                                    <div className="flex items-center gap-2 text-[11px] font-mono text-zinc-500">
-                                      <span>{f.id}</span>
-                                      {f.request_count > 0 && (
-                                        <span>• {f.request_count} reqs</span>
-                                      )}
-                                      {f.ai_explanation && (
-                                        <span className="text-emerald-400">
-                                          • AI Note
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  <div className="col-span-3 pr-2">
-                                    <div className="flex items-center gap-1.5">
-                                      <span
-                                        className={`h-2 w-2 rounded-full shrink-0 ${getSeverityDot(
-                                          f.severity
-                                        )}`}
-                                      />
-                                      <span className="text-xs text-zinc-300 leading-tight">
-                                        {f.category}
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  <div className="col-span-3">
-                                    <SourceMatrixPills
-                                      sourcesPresent={f.sources_present}
-                                      sourcesSupplied={
-                                        analysis.summary?.sources_supplied
-                                      }
-                                    />
-                                  </div>
-
-                                  <div className="col-span-1 text-right">
-                                    <span className="font-mono text-xs font-semibold tabular-nums text-zinc-100">
-                                      {f.review_priority_score}
-                                    </span>
-                                  </div>
+                      <div className="divide-y divide-zinc-800/70">
+                        {filteredFindings.map((f) => {
+                          const isSelected = selectedFinding?.id === f.id;
+                          return (
+                            <div
+                              key={f.id}
+                              onClick={() => handleSelectFinding(f.id)}
+                              className={`p-4 sm:px-5 cursor-pointer transition border-l-4 ${
+                                isSelected
+                                  ? "bg-zinc-800/60 border-l-white"
+                                  : "border-l-transparent hover:bg-zinc-900/60"
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <MethodBadge method={f.method} />
+                                  <span className="font-mono text-sm sm:text-base text-white truncate font-medium">
+                                    {f.path}
+                                  </span>
                                 </div>
 
-                                {/* Mobile / Compact Card Layout */}
-                                <div className="sm:hidden space-y-2">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <div className="flex items-center gap-1.5">
-                                      <span className="text-[11px] font-mono text-zinc-500">
-                                        {f.id}
-                                      </span>
-                                      <span
-                                        className={`h-2 w-2 rounded-full ${getSeverityDot(
-                                          f.severity
-                                        )}`}
-                                      />
-                                      <span className="text-xs text-zinc-300 font-medium">
-                                        {f.category}
-                                      </span>
-                                    </div>
-                                    <span className="text-xs font-mono font-bold tabular-nums text-zinc-100 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
-                                      {f.review_priority_score}/100
-                                    </span>
-                                  </div>
-
-                                  <div className="flex items-center gap-2 break-all">
-                                    <MethodBadge method={f.method} />
-                                    <span className="font-mono text-xs text-zinc-100 font-medium">
-                                      {f.path}
-                                    </span>
-                                  </div>
-
-                                  <div className="flex items-center justify-between gap-2 pt-0.5">
-                                    <SourceMatrixPills
-                                      sourcesPresent={f.sources_present}
-                                      sourcesSupplied={
-                                        analysis.summary?.sources_supplied
-                                      }
-                                    />
-                                    <span className="text-[11px] text-zinc-400">
-                                      Tap to inspect →
-                                    </span>
-                                  </div>
-                                </div>
+                                <span
+                                  className={`shrink-0 text-xs font-medium px-2.5 py-1 rounded-md border ${getSeverityStyle(
+                                    f.severity
+                                  )}`}
+                                >
+                                  {f.severity}
+                                </span>
                               </div>
-                            );
-                          })}
-                        </div>
-                      </>
+
+                              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2">
+                                <span className="text-sm text-zinc-300">
+                                  {f.category}
+                                </span>
+
+                                <SourceMatrixPills
+                                  sourcesPresent={f.sources_present}
+                                  sourcesSupplied={
+                                    analysis.summary?.sources_supplied
+                                  }
+                                />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
                     )}
                   </div>
 
                   {/* Right: Desktop Sticky Inspector */}
-                  <div className="hidden lg:block lg:col-span-5 sticky top-28">
+                  <div className="hidden lg:block lg:col-span-5 sticky top-24">
                     <FindingInspector
                       finding={selectedFinding}
                       sourcesSupplied={analysis.summary.sources_supplied}
@@ -825,7 +666,7 @@ export default function AutopsyWorkbench() {
               </div>
             )}
 
-            {/* Tab 2: Verification Plan & Executive Summary */}
+            {/* Tab 2: Action Plan & Executive Summary */}
             {activeTab === "plan" && (
               <PlanAndSummaryTab
                 executiveSummary={executiveSummary}
@@ -864,13 +705,8 @@ export default function AutopsyWorkbench() {
         )}
       </main>
 
-      <footer className="border-t border-zinc-900 py-3.5 px-4 sm:px-6 text-[11px] text-zinc-500 flex flex-wrap items-center justify-between gap-2 max-w-[1600px] w-full mx-auto">
-        <span>
-          API Graveyard Autopsy • Evidence-based API lifecycle investigator
-        </span>
-        <span className="font-mono">
-          Nginx • Next.js • FastAPI • Worker • Redis • Gemini
-        </span>
+      <footer className="border-t border-zinc-900 py-4 px-4 sm:px-6 text-xs text-zinc-500 max-w-7xl w-full mx-auto">
+        API Graveyard Autopsy — Evidence-based API lifecycle investigator
       </footer>
     </div>
   );

@@ -2,13 +2,11 @@
 
 import React from "react";
 import {
-  Download,
   FileUp,
   Loader2,
   Play,
   Terminal,
 } from "lucide-react";
-import { getReportDownloadUrl } from "@/lib/api";
 import { AnalysisResponse } from "@/lib/types";
 
 export type ActiveTab = "findings" | "plan" | "chat" | "sources";
@@ -17,51 +15,49 @@ interface HeaderProps {
   analysis: AnalysisResponse | null;
   activeTab: ActiveTab;
   setActiveTab: (tab: ActiveTab) => void;
-  aiStatus: {
-    enabled: boolean;
-    configured: boolean;
-    provider: string;
-    model: string | null;
-  } | null;
-  redisConnected: boolean;
   isStartingAnalysis: boolean;
   onLoadDemo: () => void;
   onOpenUploadModal: () => void;
+  onGoHome: () => void;
 }
 
 export function Header({
   analysis,
   activeTab,
   setActiveTab,
-  aiStatus,
-  redisConnected,
   isStartingAnalysis,
   onLoadDemo,
   onOpenUploadModal,
+  onGoHome,
 }: HeaderProps) {
   const isCompleted = analysis?.status === "completed";
   const findingCount = analysis?.summary?.total_findings ?? 0;
 
   return (
-    <header className="sticky top-0 z-30 border-b border-zinc-800/90 bg-[#0a0a0c]/95 backdrop-blur-sm">
-      <div className="max-w-[1600px] mx-auto px-3 sm:px-6">
+    <header className="sticky top-0 z-30 border-b border-zinc-800/80 bg-[#0a0a0c]/95 backdrop-blur-md">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6">
         {/* Top Row */}
-        <div className="h-14 flex items-center justify-between gap-2">
-          {/* Brand & Active Analysis Name */}
+        <div className="h-16 flex items-center justify-between gap-4">
+          {/* Clickable Brand Logo -> Goes to Home / Landing */}
           <div className="flex items-center gap-3 min-w-0">
-            <div className="flex items-center gap-2 shrink-0">
-              <div className="h-7 w-7 rounded-md bg-zinc-900 border border-zinc-700/80 flex items-center justify-center text-zinc-200">
+            <button
+              type="button"
+              onClick={onGoHome}
+              title="Go to Home"
+              className="flex items-center gap-2.5 shrink-0 text-left group focus:outline-none"
+            >
+              <div className="h-9 w-9 rounded-lg bg-zinc-900 border border-zinc-700/80 group-hover:border-zinc-500 flex items-center justify-center text-zinc-100 transition">
                 <Terminal className="h-4 w-4" />
               </div>
-              <span className="font-semibold text-sm tracking-tight text-zinc-100">
+              <span className="font-semibold text-base tracking-tight text-zinc-100 group-hover:text-white transition">
                 API Graveyard Autopsy
               </span>
-            </div>
+            </button>
 
             {analysis && (
               <>
                 <span className="text-zinc-700 hidden sm:inline">/</span>
-                <span className="text-xs font-mono text-zinc-400 truncate max-w-[140px] sm:max-w-[260px] hidden sm:inline">
+                <span className="text-sm text-zinc-400 truncate max-w-[180px] sm:max-w-[300px] hidden sm:inline">
                   {analysis.name}
                 </span>
               </>
@@ -69,98 +65,56 @@ export function Header({
           </div>
 
           {/* Right Controls */}
-          <div className="flex items-center gap-2 shrink-0">
-            {/* System Status Pill */}
-            <div
-              className="hidden md:flex items-center gap-2 px-2.5 py-1 rounded-md bg-zinc-900/90 border border-zinc-800 text-[11px] text-zinc-400"
-              title={
-                aiStatus?.configured
-                  ? `Google Gemini active (${aiStatus.model})`
-                  : "Gemini API key not configured in .env — deterministic fallback active"
-              }
-            >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  aiStatus?.configured ? "bg-emerald-400" : "bg-amber-400"
-                }`}
-              />
-              <span>
-                {aiStatus?.configured
-                  ? `Gemini (${aiStatus.model})`
-                  : "Fallback Mode"}
-              </span>
-              <span className="text-zinc-700">•</span>
-              <span>{redisConnected ? "Redis OK" : "Memory"}</span>
-            </div>
-
+          <div className="flex items-center gap-2.5 shrink-0">
             <button
+              type="button"
               onClick={onLoadDemo}
               disabled={isStartingAnalysis}
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-100 hover:bg-white text-zinc-950 transition disabled:opacity-50"
+              className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium bg-zinc-100 hover:bg-white text-zinc-950 transition disabled:opacity-50"
             >
               {isStartingAnalysis ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
-                <Play className="h-3 w-3 fill-current" />
+                <Play className="h-3.5 w-3.5 fill-current" />
               )}
-              <span>{analysis ? "Reload Demo" : "Load Demo"}</span>
+              <span>{analysis ? "Reload Demo" : "Try Demo"}</span>
             </button>
 
-            <button
-              onClick={onOpenUploadModal}
-              className="inline-flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-md text-xs font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition"
-            >
-              <FileUp className="h-3.5 w-3.5 text-zinc-400" />
-              <span>Upload</span>
-            </button>
-
-            {isCompleted && analysis && (
-              <div className="hidden sm:flex items-center gap-1 border-l border-zinc-800 pl-2">
-                <a
-                  href={getReportDownloadUrl(analysis.id, "markdown")}
-                  download
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-mono text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition"
-                  title="Download Markdown Audit Report"
-                >
-                  <Download className="h-3.5 w-3.5 text-zinc-400" />
-                  .MD
-                </a>
-                <a
-                  href={getReportDownloadUrl(analysis.id, "json")}
-                  download
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md text-xs font-mono text-zinc-300 hover:text-white hover:bg-zinc-900 border border-transparent hover:border-zinc-800 transition"
-                  title="Download JSON Report"
-                >
-                  <Download className="h-3.5 w-3.5 text-zinc-400" />
-                  .JSON
-                </a>
-              </div>
+            {analysis && (
+              <button
+                type="button"
+                onClick={onOpenUploadModal}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition"
+              >
+                <FileUp className="h-4 w-4 text-zinc-400" />
+                <span>New Upload</span>
+              </button>
             )}
           </div>
         </div>
 
-        {/* Second Row: Workspace Navigation Tabs (Visible when an analysis is completed) */}
+        {/* Second Row: Workspace Navigation Tabs */}
         {isCompleted && analysis && (
           <div className="flex items-center justify-between gap-2 border-t border-zinc-900 overflow-x-auto no-scrollbar">
-            <nav className="flex items-center gap-1 -mb-px">
+            <nav className="flex items-center gap-2 -mb-px">
               {(
                 [
                   {
                     id: "findings",
-                    label: "Findings & Evidence",
+                    label: "Findings",
                     count: findingCount,
                   },
                   {
                     id: "plan",
-                    label: "Verification Plan & Summary",
+                    label: "Action Plan & Summary",
                   },
                   {
                     id: "chat",
-                    label: "Ask This Analysis",
+                    label: "Ask AI",
                   },
                   {
                     id: "sources",
-                    label: "Input Sources & Export",
+                    label: "Sources & Export",
                   },
                 ] as const
               ).map((tab) => {
@@ -168,17 +122,18 @@ export function Header({
                 return (
                   <button
                     key={tab.id}
+                    type="button"
                     onClick={() => setActiveTab(tab.id)}
-                    className={`inline-flex items-center gap-2 px-3 py-2.5 text-xs font-medium border-b-2 whitespace-nowrap transition ${
+                    className={`inline-flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 whitespace-nowrap transition ${
                       isActive
-                        ? "border-zinc-100 text-zinc-100"
+                        ? "border-zinc-100 text-white"
                         : "border-transparent text-zinc-400 hover:text-zinc-200 hover:border-zinc-700"
                     }`}
                   >
                     <span>{tab.label}</span>
                     {"count" in tab && tab.count !== undefined && (
                       <span
-                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono tabular-nums ${
+                        className={`px-2 py-0.5 rounded-full text-xs font-mono tabular-nums ${
                           isActive
                             ? "bg-zinc-800 text-zinc-100"
                             : "bg-zinc-900 text-zinc-400"
@@ -191,24 +146,6 @@ export function Header({
                 );
               })}
             </nav>
-
-            {/* Mobile Export Links */}
-            <div className="flex sm:hidden items-center gap-1 pr-1 shrink-0">
-              <a
-                href={getReportDownloadUrl(analysis.id, "markdown")}
-                download
-                className="px-2 py-1 rounded text-[11px] font-mono bg-zinc-900 text-zinc-300 border border-zinc-800"
-              >
-                .MD
-              </a>
-              <a
-                href={getReportDownloadUrl(analysis.id, "json")}
-                download
-                className="px-2 py-1 rounded text-[11px] font-mono bg-zinc-900 text-zinc-300 border border-zinc-800"
-              >
-                .JSON
-              </a>
-            </div>
           </div>
         )}
       </div>
