@@ -1,0 +1,14 @@
+method,path,framework,source_file,line_number
+GET,/api/v1/users,fastapi,app/routers/users.py,18
+GET,/api/v1/users/me,fastapi,app/routers/users.py,34
+GET,/api/v1/users/{id},fastapi,app/routers/users.py,52
+POST,/api/v1/orders,fastapi,app/routers/orders.py,21
+GET,/api/v1/orders/{id},fastapi,app/routers/orders.py,47
+GET,/api/v1/reports/annual-tax-export,fastapi,app/routers/reports.py,14
+GET,/api/v1/reports/export,fastapi,app/routers/reports.py,39
+GET,/api/v1/reports/export,fastapi,app/routers/legacy_reports.py,12
+POST,/api/v1/billing/invoices/{invoice_id}/dispute,fastapi,app/routers/billing.py,64
+GET,/api/v1/admin/debug-config,fastapi,app/routers/internal_debug.py,19
+POST,/api/v1/internal/cache/warm,fastapi,app/routers/ops.py,28
+DELETE,/api/v1/legacy/sessions/cleanup,fastapi,app/routers/legacy_auth.py,88
+

@@ -1,0 +1,129 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Acme Commerce & Platform API",
+    "version": "2.4.0",
+    "description": "Synthetic OpenAPI specification for API Graveyard Autopsy demo dataset."
+  },
+  "paths": {
+    "/api/v1/users": {
+      "get": {
+        "summary": "List active users",
+        "description": "Returns paginated directory of platform users.",
+        "x-owner": "identity-team@acme.example",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/users/me": {
+      "get": {
+        "summary": "Get current authenticated user profile",
+        "description": "Static route that must remain distinct from parameterized /api/v1/users/{user_id}.",
+        "x-owner": "identity-team@acme.example",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}": {
+      "get": {
+        "summary": "Get user by ID",
+        "description": "Fetches profile details for a single user ID.",
+        "x-owner": "identity-team@acme.example",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/users/{user_id}/gdpr-purge": {
+      "delete": {
+        "summary": "Permanently purge user records for GDPR compliance",
+        "description": "Declared in OpenAPI contract, but missing from the backend route inventory.",
+        "x-owner": "privacy-eng@acme.example",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "204": { "description": "Purged" }
+        }
+      }
+    },
+    "/api/v1/orders": {
+      "post": {
+        "summary": "Create customer order",
+        "description": "Submits a new order to fulfillment.",
+        "x-owner": "checkout-team@acme.example",
+        "responses": {
+          "201": { "description": "Created" }
+        }
+      }
+    },
+    "/api/v1/orders/{order_id}": {
+      "get": {
+        "summary": "Get order status",
+        "description": "Fetches order details by ID.",
+        "x-owner": "checkout-team@acme.example",
+        "parameters": [
+          {
+            "name": "order_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/reports/annual-tax-export": {
+      "get": {
+        "summary": "Generate annual tax compliance export",
+        "description": "Seasonal financial export endpoint run during quarterly/annual close.",
+        "x-owner": "finance-systems@acme.example",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    },
+    "/api/v1/billing/invoices/{invoice_id}/dispute": {
+      "post": {
+        "summary": "Open an invoice dispute",
+        "parameters": [
+          {
+            "name": "invoice_id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "202": { "description": "Accepted" }
+        }
+      }
+    },
+    "/api/v2/webhooks/test-delivery": {
+      "post": {
+        "summary": "Trigger synthetic webhook test delivery",
+        "responses": {
+          "200": { "description": "OK" }
+        }
+      }
+    }
+  }
+}
+
