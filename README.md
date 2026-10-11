@@ -6,6 +6,21 @@ API Graveyard Autopsy is an AI-powered, evidence-based API lifecycle investigato
 
 ---
 
+## 🎬 Live Product Walkthrough
+
+<div align="center">
+  <video src="./demo.mkv" controls width="100%" preload="metadata" style="max-width: 960px; border-radius: 8px; border: 1px solid #30363d;">
+    <source src="./demo.mkv" type="video/mp4" />
+    <source src="./demo.mkv" type="video/x-matroska" />
+    Your Markdown viewer does not support inline video playback.
+  </video>
+  <p>
+    <a href="./demo.mkv"><strong>▶️ Watch / Download Demo Video (<code>demo.mkv</code>)</strong></a>
+  </p>
+</div>
+
+---
+
 ## 📖 What Is This Project?
 
 ### 🚨 The Problem
