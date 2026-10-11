@@ -2,13 +2,20 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+try:
+    import httpx
+except ImportError:  # pragma: no cover
+    httpx = None  # type: ignore[assignment]
+
+from app.services.normalizer import is_likely_parameter_value, normalize_template_path
 from app.services.openapi_parser import OpenAPIParseError, parse_openapi_content
 
 
@@ -66,9 +73,29 @@ SPECLESS_DISCOVERY_CANDIDATES: List[Tuple[str, str]] = [
     ("GET", "/todos"),
     ("GET", "/products"),
     ("GET", "/items"),
+    ("GET", "/orders"),
+    ("GET", "/accounts"),
     ("GET", "/api"),
     ("GET", "/api/v1"),
     ("GET", "/api/v2"),
+    ("GET", "/v1"),
+    ("GET", "/v2"),
+]
+
+PREFIX_SUBRESOURCE_CANDIDATES: List[str] = [
+    "users",
+    "orders",
+    "accounts",
+    "products",
+    "items",
+    "posts",
+    "todos",
+    "currencies",
+    "latest",
+    "health",
+    "status",
+    "version",
+    "config",
 ]
 
 COMMON_OPENAPI_PATHS: List[str] = [
@@ -76,8 +103,13 @@ COMMON_OPENAPI_PATHS: List[str] = [
     "/swagger.json",
     "/api/openapi.json",
     "/api/v1/openapi.json",
+    "/api/v2/openapi.json",
+    "/v1/openapi.json",
+    "/v2/openapi.json",
     "/v3/api-docs",
     "/docs/openapi.json",
+    "/openapi.yaml",
+    "/swagger.yaml",
 ]
 
 IMPLEMENTED_STATUS_CODES = {
@@ -85,10 +117,6 @@ IMPLEMENTED_STATUS_CODES = {
     201,
     202,
     204,
-    301,
-    302,
-    307,
-    308,
     400,
     401,
     403,
@@ -98,6 +126,95 @@ IMPLEMENTED_STATUS_CODES = {
     422,
     429,
 }
+
+TRANSIENT_RETRY_STATUS_CODES = {429, 502, 503, 504}
+
+STATIC_ASSET_EXTENSIONS = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".svg",
+    ".ico",
+    ".css",
+    ".js",
+    ".mjs",
+    ".map",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pdf",
+    ".zip",
+)
+
+COLLECTION_WRAPPER_KEYS = (
+    "data",
+    "items",
+    "results",
+    "records",
+    "rows",
+    "entries",
+    "users",
+    "orders",
+    "accounts",
+    "products",
+    "posts",
+    "todos",
+    "currencies",
+)
+
+ITEM_ID_KEYS = (
+    "id",
+    "_id",
+    "uuid",
+    "user_id",
+    "order_id",
+    "account_id",
+    "product_id",
+    "item_id",
+    "post_id",
+    "todo_id",
+    "code",
+)
+
+HYPERMEDIA_LINK_KEYS = {
+    "href",
+    "url",
+    "uri",
+    "path",
+    "endpoint",
+    "self",
+    "next",
+    "collection",
+    "documentation_url",
+    "openapi_url",
+    "swagger_url",
+}
+
+_DYNAMIC_TS_OR_UUID_RE = re.compile(
+    r"(?:\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b"
+    r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b)"
+)
+_HTML_HREF_RE = re.compile(r"""href=["'](/[^"'#?\s>]+)["']""", re.IGNORECASE)
+
+_shared_httpx_client: Optional[Any] = None
+
+
+def _get_shared_httpx_client() -> Optional[Any]:
+    global _shared_httpx_client
+    if httpx is None:
+        return None
+    if _shared_httpx_client is None:
+        try:
+            _shared_httpx_client = httpx.Client(
+                follow_redirects=False,
+                verify=True,
+                limits=httpx.Limits(max_keepalive_connections=16, max_connections=24),
+            )
+        except Exception:
+            return None
+    return _shared_httpx_client
 
 
 def build_auth_headers_and_params(
@@ -212,7 +329,7 @@ def _default_urllib_requester(
     method: str,
     url: str,
     headers: Dict[str, str],
-    timeout: float = 4.5,
+    timeout: float = 6.0,
 ) -> Tuple[int, bytes]:
     body_data: Optional[bytes] = None
     req_headers = dict(headers)
@@ -220,22 +337,86 @@ def _default_urllib_requester(
         body_data = b"{}"
         req_headers.setdefault("Content-Type", "application/json")
 
-    req = urllib.request.Request(
-        url=url,
-        data=body_data,
-        headers=req_headers,
-        method=method.upper(),
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode() or 200, resp.read()
-    except urllib.error.HTTPError as http_err:
-        err_body = http_err.read() if http_err.fp else b""
-        return http_err.code, err_body
-    except urllib.error.URLError as url_err:
-        raise ConnectionError(f"Failed to connect to {url}: {url_err.reason}") from url_err
-    except TimeoutError as time_err:
-        raise ConnectionError(f"Timed out connecting to {url}") from time_err
+    # Prefer persistent HTTP/1.1 keep-alive connection pool via httpx when available
+    # so concurrent probes reuse TLS sockets instead of triggering rate-limits or handshake timeouts.
+    client = _get_shared_httpx_client()
+    if client is not None:
+        current_url = url
+        for _ in range(4):
+            try:
+                resp = client.request(
+                    method=method.upper(),
+                    url=current_url,
+                    content=body_data,
+                    headers=req_headers,
+                    timeout=timeout,
+                )
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("location") or resp.headers.get("Location")
+                    if loc:
+                        current_url = urllib.parse.urljoin(current_url, loc)
+                        continue
+                return resp.status_code, resp.content
+            except Exception as exc:
+                raise ConnectionError(f"Failed to connect to {current_url}: {exc}") from exc
+        return 404, b""
+
+    current_url = url
+    for _ in range(4):
+        req = urllib.request.Request(
+            url=current_url,
+            data=body_data,
+            headers=req_headers,
+            method=method.upper(),
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.getcode() or 200, resp.read()
+        except urllib.error.HTTPError as http_err:
+            if http_err.code in (301, 302, 303, 307, 308) and http_err.headers:
+                loc = http_err.headers.get("Location")
+                if loc:
+                    current_url = urllib.parse.urljoin(current_url, loc)
+                    continue
+            err_body = http_err.read() if http_err.fp else b""
+            return http_err.code, err_body
+        except urllib.error.URLError as url_err:
+            raise ConnectionError(f"Failed to connect to {current_url}: {url_err.reason}") from url_err
+        except TimeoutError as time_err:
+            raise ConnectionError(f"Timed out connecting to {current_url}") from time_err
+    return 404, b""
+
+
+def _request_with_retry(
+    http_req: HttpRequester,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    timeout: float,
+    max_attempts: int = 3,
+    backoff_seconds: float = 0.12,
+) -> Tuple[int, bytes]:
+    """Execute an HTTP request with automatic retry on transient connection/timeout/5xx/429 errors."""
+    last_exc: Optional[Exception] = None
+    last_result: Optional[Tuple[int, bytes]] = None
+    for attempt in range(max_attempts):
+        try:
+            status_code, body = http_req(method, url, headers, timeout)
+            last_result = (status_code, body)
+            if status_code not in TRANSIENT_RETRY_STATUS_CODES or attempt == max_attempts - 1:
+                return status_code, body
+        except Exception as exc:
+            last_exc = exc
+            if attempt == max_attempts - 1:
+                break
+        if backoff_seconds > 0:
+            time.sleep(backoff_seconds * (attempt + 1))
+
+    if last_result is not None:
+        return last_result
+    if last_exc is not None:
+        raise last_exc
+    return 404, b""
 
 
 def _append_url_path_and_params(
@@ -257,8 +438,85 @@ def _append_url_path_and_params(
     return urllib.parse.urlunparse(parsed._replace(query=encoded_qs))
 
 
-def _materialize_probe_path(template_path: str) -> str:
-    return re.sub(r"\{[^/{}]+\}", "autopsy-probe-1", template_path)
+def _materialize_probe_path(template_path: str, sample_value: str = "autopsy-probe-1") -> str:
+    return re.sub(r"\{[^/{}]+\}|:[a-zA-Z0-9_\-]+|<[^/{}>]+>", sample_value, template_path)
+
+
+def _canonicalize_discovered_path(raw_path: str, is_concrete: bool) -> Tuple[str, str]:
+    """
+    Convert a path into (template_path, canonical_norm_path).
+    For concrete paths discovered during deep crawling (e.g. '/users/42' or '/orders/ord-5501'),
+    coerces concrete entity ID segments into '{param}' so multiple concrete links to the same
+    parameterized endpoint are deduplicated and probed only once.
+    """
+    clean = (raw_path or "/").split("?")[0].split("#")[0].strip()
+    if not clean.startswith("/"):
+        clean = f"/{clean}"
+    clean = re.sub(r"/+", "/", clean)
+    if len(clean) > 1 and clean.endswith("/"):
+        clean = clean.rstrip("/")
+
+    if not is_concrete:
+        norm_p, _, _, _ = normalize_template_path(clean)
+        return clean, norm_p
+
+    if clean == "/":
+        return "/", "/"
+
+    segments = [seg for seg in clean.split("/") if seg]
+    tmpl_segments: List[str] = []
+    for seg in segments:
+        if is_likely_parameter_value(seg):
+            tmpl_segments.append("{param}")
+        else:
+            tmpl_segments.append(seg)
+    tmpl_path = "/" + "/".join(tmpl_segments)
+    norm_p, _, _, _ = normalize_template_path(tmpl_path)
+    return tmpl_path, norm_p
+
+
+def _compute_body_fingerprint(body: bytes, concrete_path: str) -> Tuple[int, Tuple[str, ...]]:
+    """
+    Compute a normalized fingerprint (normalized_length, top_level_json_keys) for canary comparison.
+    Strips echoed request paths, ISO timestamps, and UUIDs so catch-all responses are matched
+    deterministically even when the server echoes the URL or current timestamp.
+    """
+    if not body:
+        return 0, ()
+    text = body.decode("utf-8", errors="replace").strip()
+    top_keys: Tuple[str, ...] = ()
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            top_keys = tuple(sorted(str(k) for k in parsed.keys()))
+        elif isinstance(parsed, list):
+            top_keys = ("__list__",)
+    except Exception:
+        pass
+
+    clean_p = concrete_path if concrete_path.startswith("/") else f"/{concrete_path}"
+    norm_text = text.replace(clean_p, "{PATH}")
+    if len(clean_p) > 1:
+        norm_text = norm_text.replace(clean_p.lstrip("/"), "{PATH}")
+    norm_text = _DYNAMIC_TS_OR_UUID_RE.sub("{DYNAMIC}", norm_text)
+    return len(norm_text), top_keys
+
+
+def _matches_canary(
+    status_code: int,
+    body: bytes,
+    concrete_path: str,
+    canary_sig: Optional[Tuple[int, int, Tuple[str, ...]]],
+) -> bool:
+    if canary_sig is None:
+        return False
+    c_status, c_norm_len, c_keys = canary_sig
+    if status_code != c_status:
+        return False
+    norm_len, top_keys = _compute_body_fingerprint(body, concrete_path)
+    if c_keys and top_keys and c_keys != top_keys:
+        return False
+    return abs(norm_len - c_norm_len) <= 24
 
 
 def parse_extra_probe_paths(raw_extra: Optional[str]) -> List[Tuple[str, str]]:
@@ -283,39 +541,135 @@ def parse_extra_probe_paths(raw_extra: Optional[str]) -> List[Tuple[str, str]]:
     return results
 
 
-def _extract_candidate_paths_from_json_body(body: bytes, origin_url: str) -> List[str]:
-    """Extract relative API paths or same-origin URLs embedded inside a JSON response."""
-    discovered: List[str] = []
-    if not body:
-        return discovered
-    try:
-        data = json.loads(body.decode("utf-8-sig"))
-    except Exception:
-        return discovered
+def _is_valid_api_candidate_path(path_str: str) -> bool:
+    if not path_str or not path_str.startswith("/") or path_str.startswith("//"):
+        return False
+    if " " in path_str or "\n" in path_str or "\t" in path_str:
+        return False
+    lower = path_str.lower()
+    if any(lower.endswith(ext) for ext in STATIC_ASSET_EXTENSIONS):
+        return False
+    if lower.startswith("/_autopsy"):
+        return False
+    return len(path_str) > 1
 
-    def _visit(val: Any) -> None:
-        if len(discovered) >= 10:
+
+def _extract_candidate_paths_from_json_body(
+    body: bytes,
+    origin_url: str,
+    current_path: str = "/",
+) -> List[str]:
+    """
+    Deeply extract candidate API paths from a JSON or HTML response body:
+    1. Relative paths ('/api/v1/users') and same-origin URLs anywhere in nested JSON.
+    2. Hypermedia/HATEOAS link fields ('href', 'url', 'uri', 'path', 'endpoint', '_links').
+    3. Collection-to-detail route inference: if a collection endpoint (e.g. '/users') returns
+       objects with an ID field ('id', 'user_id', 'order_id', etc.), synthesizes '/users/{sample_id}'.
+    4. HTML href links if the endpoint returned an HTML index page.
+    """
+    discovered_set: Set[str] = set()
+    if not body:
+        return []
+
+    try:
+        text = body.decode("utf-8-sig", errors="replace").strip()
+    except Exception:
+        return []
+
+    if not text:
+        return []
+
+    # Check HTML links if response looks like HTML
+    if text.startswith("<") or "<a " in text.lower():
+        for match in _HTML_HREF_RE.findall(text):
+            clean_m = match.split("?")[0].split("#")[0].strip()
+            if _is_valid_api_candidate_path(clean_m):
+                discovered_set.add(clean_m)
+
+    try:
+        data = json.loads(text)
+    except Exception:
+        return sorted(discovered_set)
+
+    base_dir = current_path.rstrip("/") or ""
+
+    def _add_candidate(raw_val: str, allow_relative_to_current: bool = False) -> None:
+        if len(discovered_set) >= 60:
+            return
+        s = raw_val.strip()
+        if not s or " " in s:
+            return
+        if s.startswith(origin_url):
+            rel = s[len(origin_url):].split("?")[0].split("#")[0]
+            if _is_valid_api_candidate_path(rel):
+                discovered_set.add(rel)
+        elif s.startswith("/") and not s.startswith("//"):
+            path_only = s.split("?")[0].split("#")[0]
+            if _is_valid_api_candidate_path(path_only):
+                discovered_set.add(path_only)
+        elif (
+            allow_relative_to_current
+            and not s.startswith(("http://", "https://", "mailto:", "javascript:", "#"))
+            and re.match(r"^[a-zA-Z0-9_\-\./]+$", s)
+        ):
+            rel_joined = f"{base_dir}/{s.lstrip('./')}".replace("//", "/")
+            path_only = rel_joined.split("?")[0].split("#")[0]
+            if _is_valid_api_candidate_path(path_only):
+                discovered_set.add(path_only)
+
+    def _visit(val: Any, depth: int = 0) -> None:
+        if depth > 8 or len(discovered_set) >= 60:
             return
         if isinstance(val, str):
-            s = val.strip()
-            if s.startswith("/") and len(s) > 1 and not s.startswith("//") and " " not in s:
-                path_only = s.split("?")[0]
-                if path_only not in discovered:
-                    discovered.append(path_only)
-            elif s.startswith(origin_url):
-                rel = s[len(origin_url):].split("?")[0]
-                if rel.startswith("/") and len(rel) > 1 and rel not in discovered:
-                    discovered.append(rel)
+            _add_candidate(val, allow_relative_to_current=False)
         elif isinstance(val, dict):
             for k, v in val.items():
-                _visit(k)
-                _visit(v)
+                k_str = str(k).strip()
+                k_lower = k_str.lower()
+                _add_candidate(k_str, allow_relative_to_current=False)
+                if k_lower in HYPERMEDIA_LINK_KEYS and isinstance(v, str):
+                    _add_candidate(v, allow_relative_to_current=True)
+                else:
+                    _visit(v, depth + 1)
         elif isinstance(val, list):
-            for item in val[:15]:
-                _visit(item)
+            for item in val[:60]:
+                _visit(item, depth + 1)
 
     _visit(data)
-    return discovered
+
+    # Collection -> Item Detail inference (e.g., GET /users returning [{"id": 1, ...}] -> probe /users/1)
+    clean_curr = (current_path or "/").rstrip("/")
+    if clean_curr and clean_curr != "/":
+        last_seg = clean_curr.split("/")[-1]
+        if not is_likely_parameter_value(last_seg) and "{param}" not in clean_curr:
+            items_list: Optional[List[Any]] = None
+            if isinstance(data, list) and len(data) > 0:
+                items_list = data
+            elif isinstance(data, dict):
+                for wk in (last_seg.lower(), *COLLECTION_WRAPPER_KEYS):
+                    cand_list = data.get(wk)
+                    if isinstance(cand_list, list) and len(cand_list) > 0:
+                        items_list = cand_list
+                        break
+
+            if items_list:
+                for row_obj in items_list[:5]:
+                    if isinstance(row_obj, dict):
+                        sample_id: Optional[str] = None
+                        for id_key in ITEM_ID_KEYS:
+                            raw_id = row_obj.get(id_key)
+                            if isinstance(raw_id, (int, str)) and str(raw_id).strip():
+                                id_str = str(raw_id).strip()
+                                if "/" not in id_str and " " not in id_str and len(id_str) <= 64:
+                                    sample_id = id_str
+                                    break
+                        if sample_id is not None:
+                            detail_path = f"{clean_curr}/{sample_id}"
+                            if _is_valid_api_candidate_path(detail_path):
+                                discovered_set.add(detail_path)
+                            break
+
+    return sorted(discovered_set)
 
 
 def collect_live_api_sources(
@@ -329,12 +683,17 @@ def collect_live_api_sources(
     openapi_override_filename: str = "openapi.json",
     logs_override_bytes: Optional[bytes] = None,
     logs_override_filename: str = "access-logs.csv",
-    timeout_seconds: float = 4.5,
+    timeout_seconds: float = 6.0,
     requester: Optional[HttpRequester] = None,
 ) -> LiveScanResult:
     auth = auth_config or LiveAuthConfig()
-    headers, query_params, auth_summary = build_auth_headers_and_params(auth)
+    base_headers, query_params, auth_summary = build_auth_headers_and_params(auth)
+    # Mark all scanner requests with X-Autopsy-Log-Ignore so target servers never pollute live traffic logs
+    scan_headers = dict(base_headers)
+    scan_headers["X-Autopsy-Log-Ignore"] = "true"
+
     http_req = requester or _default_urllib_requester
+    retry_backoff = 0.0 if requester is not None else 0.12
     candidates = resolve_candidate_base_urls(target_base_url)
 
     resolved_base: Optional[str] = None
@@ -346,7 +705,15 @@ def collect_live_api_sources(
     for cand in candidates:
         test_url = _append_url_path_and_params(cand, probe_check_path, query_params)
         try:
-            st, bd = http_req("GET", test_url, headers, timeout_seconds)
+            st, bd = _request_with_retry(
+                http_req,
+                "GET",
+                test_url,
+                scan_headers,
+                timeout_seconds,
+                max_attempts=2,
+                backoff_seconds=retry_backoff,
+            )
             resolved_base = cand
             cached_first_oa_response = (cand, probe_check_path, st, bd)
             break
@@ -354,7 +721,15 @@ def collect_live_api_sources(
             last_conn_err = str(exc)
             try:
                 direct_url = _append_url_path_and_params(cand, "", query_params)
-                st, bd = http_req("GET", direct_url, headers, timeout_seconds)
+                st, bd = _request_with_retry(
+                    http_req,
+                    "GET",
+                    direct_url,
+                    scan_headers,
+                    timeout_seconds,
+                    max_attempts=2,
+                    backoff_seconds=retry_backoff,
+                )
                 resolved_base = cand
                 initial_user_url_response = (st, bd)
                 break
@@ -397,15 +772,19 @@ def collect_live_api_sources(
             else:
                 last_oa_error = f"HTTP {c_status} at {c_path}"
 
-        # 2. If not found on first check, probe candidate OpenAPI paths concurrently
+        # 2. If not found on first check, probe candidate OpenAPI paths deterministically with retries
         if final_openapi_bytes is None:
             oa_candidates: List[Tuple[str, str]] = []
             search_paths = [probe_check_path] + [p for p in COMMON_OPENAPI_PATHS if p != probe_check_path]
-            # Check origin root first for standard OpenAPI paths, plus resolved_base if different
             roots_to_try = [origin_url] if origin_url == resolved_base else [resolved_base, origin_url]
             for b_root in roots_to_try:
                 for oa_p in search_paths:
-                    if cached_first_oa_response and b_root == cached_first_oa_response[0] and oa_p == cached_first_oa_response[1]:
+                    if (
+                        cached_first_oa_response
+                        and b_root == cached_first_oa_response[0]
+                        and oa_p == cached_first_oa_response[1]
+                        and cached_first_oa_response[2] not in TRANSIENT_RETRY_STATUS_CODES
+                    ):
                         continue
                     if (b_root, oa_p) not in oa_candidates:
                         oa_candidates.append((b_root, oa_p))
@@ -414,7 +793,15 @@ def collect_live_api_sources(
                 b_root, oa_p = item
                 oa_url = _append_url_path_and_params(b_root, oa_p, query_params)
                 try:
-                    st_code, body = http_req("GET", oa_url, headers, timeout_seconds)
+                    st_code, body = _request_with_retry(
+                        http_req,
+                        "GET",
+                        oa_url,
+                        scan_headers,
+                        timeout_seconds,
+                        max_attempts=2,
+                        backoff_seconds=retry_backoff,
+                    )
                     if st_code == 200 and body and body.strip():
                         parse_openapi_content(body, filename=oa_p.split("/")[-1] or "openapi.json")
                         return b_root, oa_p, body, None
@@ -422,7 +809,7 @@ def collect_live_api_sources(
                 except Exception as exc:
                     return b_root, oa_p, None, str(exc)
 
-            with ThreadPoolExecutor(max_workers=6) as oa_pool:
+            with ThreadPoolExecutor(max_workers=4) as oa_pool:
                 for b_root, oa_p, valid_body, err_str in oa_pool.map(_try_fetch_oa, oa_candidates):
                     if valid_body is not None and final_openapi_bytes is None:
                         final_openapi_bytes = valid_body
@@ -445,7 +832,7 @@ def collect_live_api_sources(
                     "description": (
                         f"Target API '{origin_url}' does not publish a public OpenAPI specification "
                         f"(last check: {last_oa_error or 'HTTP 404'}). "
-                        "Autopsy ran in Spec-less Live Discovery Mode: all active routes discovered via HTTP probing "
+                        "Autopsy ran in Spec-less Live Discovery Mode: all active routes discovered via deep HTTP probing "
                         "are evaluated against this empty OpenAPI baseline as undocumented API surface."
                     ),
                 },
@@ -466,7 +853,15 @@ def collect_live_api_sources(
 
     introspect_routes_url = _append_url_path_and_params(resolved_base, "/_autopsy/routes", query_params)
     try:
-        r_status, r_body = http_req("GET", introspect_routes_url, headers, timeout_seconds)
+        r_status, r_body = _request_with_retry(
+            http_req,
+            "GET",
+            introspect_routes_url,
+            scan_headers,
+            timeout_seconds,
+            max_attempts=2,
+            backoff_seconds=retry_backoff,
+        )
         if r_status == 200 and r_body:
             r_json = json.loads(r_body.decode("utf-8-sig"))
             raw_list = r_json.get("routes") if isinstance(r_json, dict) else (r_json if isinstance(r_json, list) else None)
@@ -494,149 +889,232 @@ def collect_live_api_sources(
 
     probed_count = 0
     if probe_endpoints or is_specless_mode:
-        probe_targets: List[Tuple[str, str]] = []
-        seen_targets: set[Tuple[str, str]] = set()
-        explicit_targets: set[Tuple[str, str]] = set()
+        # Track canonical (method, normalized_path) so we never probe or register duplicate concrete routes
+        queued_canonical_targets: Set[Tuple[str, str]] = set()
+        explicit_canonical_targets: Set[Tuple[str, str]] = set()
+        openapi_canonical_targets: Set[Tuple[str, str]] = set()
+        # Each queue item is (method, template_path, concrete_path)
+        current_hop_queue: List[Tuple[str, str, str]] = []
 
-        def _add_probe(m: str, p: str, is_explicit: bool = False) -> None:
-            clean_p = p if p.startswith("/") else f"/{p}"
-            pair = (m.upper(), clean_p)
+        def _enqueue_target(
+            method: str,
+            raw_path: str,
+            is_concrete: bool = False,
+            is_explicit: bool = False,
+            is_openapi: bool = False,
+        ) -> None:
+            m_up = method.upper().strip()
+            tmpl_p, canon_p = _canonicalize_discovered_path(raw_path, is_concrete=is_concrete)
+            concrete_p = (
+                raw_path.split("?")[0].split("#")[0].strip()
+                if is_concrete
+                else _materialize_probe_path(tmpl_p)
+            )
+            if not concrete_p.startswith("/"):
+                concrete_p = f"/{concrete_p}"
+
+            canon_key = (m_up, canon_p)
             if is_explicit:
-                explicit_targets.add(pair)
-            if pair not in seen_targets:
-                seen_targets.add(pair)
-                probe_targets.append(pair)
+                explicit_canonical_targets.add(canon_key)
+            if is_openapi:
+                openapi_canonical_targets.add(canon_key)
+            if canon_key not in queued_canonical_targets:
+                queued_canonical_targets.add(canon_key)
+                current_hop_queue.append((m_up, tmpl_p, concrete_p))
 
+        # 1. Seed user-supplied path and any parent prefix segments (e.g. /api/v1/users -> /api/v1/users, /api/v1, /api)
         if user_supplied_path and user_supplied_path != "/":
-            _add_probe("GET", user_supplied_path, is_explicit=True)
+            _enqueue_target("GET", user_supplied_path, is_concrete=False, is_explicit=True)
+            path_parts = [seg for seg in user_supplied_path.split("/") if seg]
+            for i in range(len(path_parts) - 1, 0, -1):
+                parent_prefix = "/" + "/".join(path_parts[:i])
+                _enqueue_target("GET", parent_prefix, is_concrete=False, is_explicit=True)
+        elif is_specless_mode:
+            _enqueue_target("GET", "/", is_concrete=False, is_explicit=True)
 
+        # 2. Seed all documented OpenAPI endpoints
         for ep in parsed_oa.endpoints:
-            _add_probe(ep.method.upper(), ep.original_path, is_explicit=True)
+            _enqueue_target(
+                ep.method.upper(),
+                ep.original_path,
+                is_concrete=False,
+                is_explicit=True,
+                is_openapi=True,
+            )
 
+        # 3. Seed user's extra probe paths
         for m, p in parse_extra_probe_paths(extra_probe_paths):
-            _add_probe(m, p, is_explicit=True)
+            _enqueue_target(m, p, is_concrete=False, is_explicit=True)
 
+        # 4. Seed Spec-less discovery candidates (both at root and under user-supplied prefix if applicable)
         if is_specless_mode:
             for m, p in SPECLESS_DISCOVERY_CANDIDATES:
-                _add_probe(m, p, is_explicit=False)
+                _enqueue_target(m, p, is_concrete=False, is_explicit=False)
+            if user_supplied_path and user_supplied_path != "/":
+                clean_prefix = user_supplied_path.rstrip("/")
+                for sub_res in PREFIX_SUBRESOURCE_CANDIDATES:
+                    _enqueue_target("GET", f"{clean_prefix}/{sub_res}", is_concrete=False, is_explicit=False)
 
+        # 5. Seed shadow / legacy v1 wordlist
         if include_shadow_wordlist:
             for m, p in DEFAULT_SHADOW_CANDIDATES:
-                _add_probe(m, p, is_explicit=False)
+                _enqueue_target(m, p, is_concrete=False, is_explicit=False)
 
-        probe_headers = dict(headers)
-        probe_headers["X-Autopsy-Log-Ignore"] = "true"
+        # Establish normalized canary signature to filter out catch-all 200 OK fallbacks (e.g. SPA routers)
+        canary_signature: Optional[Tuple[int, int, Tuple[str, ...]]] = None
+        canary_path = "/_autopsy_canary_nonexistent_9f8a7b"
+        canary_url = _append_url_path_and_params(resolved_base, canary_path, query_params)
+        try:
+            c_status, c_body = _request_with_retry(
+                http_req,
+                "GET",
+                canary_url,
+                scan_headers,
+                timeout_seconds,
+                max_attempts=2,
+                backoff_seconds=retry_backoff,
+            )
+            if c_status in IMPLEMENTED_STATUS_CODES:
+                c_norm_len, c_keys = _compute_body_fingerprint(c_body or b"", canary_path)
+                canary_signature = (c_status, c_norm_len, c_keys)
+        except Exception:
+            pass
 
-        canary_signature: Optional[Tuple[int, int]] = None
-        if is_specless_mode:
-            canary_url = _append_url_path_and_params(resolved_base, "/_autopsy_canary_nonexistent_9f8a7b", query_params)
-            try:
-                c_status, c_body = http_req("GET", canary_url, probe_headers, timeout_seconds)
-                if c_status in IMPLEMENTED_STATUS_CODES:
-                    canary_signature = (c_status, len(c_body or b""))
-            except Exception:
-                pass
-
-        already_implemented_pairs = {(r["method"], r["path"]) for r in discovered_routes}
+        # Track already implemented canonical (method, normalized_path) pairs
+        already_implemented_canonical: Set[Tuple[str, str]] = {
+            (r["method"].upper(), normalize_template_path(r["path"])[0]) for r in discovered_routes
+        }
+        expanded_prefixes: Set[str] = set()
         now_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-        def _probe_single_target(item: Tuple[str, str]) -> Optional[Tuple[str, str, str, int, bytes]]:
-            method, template_path = item
-            concrete_path = _materialize_probe_path(template_path)
+        def _probe_single_target(
+            item: Tuple[str, str, str]
+        ) -> Optional[Tuple[str, str, str, int, bytes]]:
+            method, template_path, concrete_path = item
             probe_url = _append_url_path_and_params(resolved_base, concrete_path, query_params)
             try:
-                p_status, p_body = http_req(method, probe_url, probe_headers, timeout_seconds)
+                p_status, p_body = _request_with_retry(
+                    http_req,
+                    method,
+                    probe_url,
+                    scan_headers,
+                    timeout_seconds,
+                    max_attempts=2,
+                    backoff_seconds=retry_backoff,
+                )
+                canon_key = (method, normalize_template_path(template_path)[0])
+                # Fallback for integer-typed OpenAPI path parameters (e.g. /users/{id} where 'autopsy-probe-1' 404s)
+                if (
+                    p_status == 404
+                    and canon_key in openapi_canonical_targets
+                    and "autopsy-probe-1" in concrete_path
+                ):
+                    int_concrete = concrete_path.replace("autopsy-probe-1", "1")
+                    int_url = _append_url_path_and_params(resolved_base, int_concrete, query_params)
+                    alt_status, alt_body = _request_with_retry(
+                        http_req,
+                        method,
+                        int_url,
+                        scan_headers,
+                        timeout_seconds,
+                        max_attempts=2,
+                        backoff_seconds=retry_backoff,
+                    )
+                    if alt_status in IMPLEMENTED_STATUS_CODES:
+                        return method, template_path, int_concrete, alt_status, alt_body
                 return method, template_path, concrete_path, p_status, p_body
             except Exception:
                 return None
 
-        # Execute probes concurrently in a thread pool so internet APIs finish in ~1.5s instead of 40s
-        with ThreadPoolExecutor(max_workers=8) as probe_pool:
-            probe_results = list(probe_pool.map(_probe_single_target, probe_targets))
+        max_crawl_depth = 3
+        max_total_probes = 90
+        crawl_hops_executed = 0
 
-        extra_discovered_links: List[Tuple[str, str]] = []
-        for res_item in probe_results:
-            if res_item is None:
-                continue
-            method, template_path, concrete_path, p_status, p_body = res_item
-            probed_count += 1
+        for hop in range(max_crawl_depth):
+            if not current_hop_queue or probed_count >= max_total_probes:
+                break
 
-            if is_specless_mode and p_status == 200 and p_body and (method, template_path) in explicit_targets:
-                for linked_path in _extract_candidate_paths_from_json_body(p_body, origin_url):
-                    clean_lp = linked_path if linked_path.startswith("/") else f"/{linked_path}"
-                    if ("GET", clean_lp) not in seen_targets:
-                        seen_targets.add(("GET", clean_lp))
-                        extra_discovered_links.append(("GET", clean_lp))
+            remaining_budget = max_total_probes - probed_count
+            batch_to_probe = current_hop_queue[:remaining_budget]
+            current_hop_queue = []
+            crawl_hops_executed = hop + 1
 
-            if p_status in IMPLEMENTED_STATUS_CODES:
-                if (
-                    canary_signature is not None
-                    and (method, template_path) not in explicit_targets
-                    and p_status == canary_signature[0]
-                    and abs(len(p_body or b"") - canary_signature[1]) <= 16
-                ):
+            with ThreadPoolExecutor(max_workers=4) as probe_pool:
+                probe_results = list(probe_pool.map(_probe_single_target, batch_to_probe))
+
+            next_hop_candidates: List[Tuple[str, bool]] = []
+
+            for res_item in probe_results:
+                if res_item is None:
+                    continue
+                method, template_path, concrete_path, p_status, p_body = res_item
+                probed_count += 1
+                canon_norm = normalize_template_path(template_path)[0]
+                canon_key = (method, canon_norm)
+
+                is_catchall = (
+                    canon_key not in explicit_canonical_targets
+                    and _matches_canary(p_status, p_body or b"", concrete_path, canary_signature)
+                )
+                if is_catchall:
                     continue
 
-                if (method, template_path) not in already_implemented_pairs:
-                    already_implemented_pairs.add((method, template_path))
-                    source_note = (
-                        f"HTTP {p_status} on {concrete_path} (No public OpenAPI spec on server)"
-                        if is_specless_mode
-                        else f"HTTP {p_status} on {concrete_path}"
-                    )
-                    discovered_routes.append(
-                        {
-                            "method": method,
-                            "path": template_path,
-                            "framework": "live-http-probe",
-                            "source_file": source_note,
-                            "line_number": None,
-                        }
-                    )
+                # Deeply extract links, hypermedia paths, and collection item detail routes from 200 OK bodies
+                if p_status == 200 and p_body and hop < max_crawl_depth - 1:
+                    for linked_path in _extract_candidate_paths_from_json_body(
+                        p_body, origin_url, current_path=concrete_path
+                    ):
+                        next_hop_candidates.append((linked_path, True))
 
-                if is_specless_mode:
-                    synthesized_probe_logs.append(
-                        {
-                            "timestamp": now_ts,
-                            "method": method,
-                            "path": concrete_path,
-                            "status_code": p_status,
-                        }
-                    )
+                if p_status in IMPLEMENTED_STATUS_CODES:
+                    if canon_key not in already_implemented_canonical:
+                        already_implemented_canonical.add(canon_key)
+                        source_note = (
+                            f"HTTP {p_status} on {concrete_path} (No public OpenAPI spec on server)"
+                            if is_specless_mode
+                            else f"HTTP {p_status} on {concrete_path}"
+                        )
+                        discovered_routes.append(
+                            {
+                                "method": method,
+                                "path": template_path,
+                                "framework": "live-http-probe",
+                                "source_file": source_note,
+                                "line_number": None,
+                            }
+                        )
 
-        if extra_discovered_links:
-            with ThreadPoolExecutor(max_workers=6) as link_pool:
-                for res_item in link_pool.map(_probe_single_target, extra_discovered_links):
-                    if res_item is None:
-                        continue
-                    method, template_path, concrete_path, p_status, p_body = res_item
-                    probed_count += 1
-                    if p_status in IMPLEMENTED_STATUS_CODES:
-                        if (
-                            canary_signature is not None
-                            and p_status == canary_signature[0]
-                            and abs(len(p_body or b"") - canary_signature[1]) <= 16
-                        ):
-                            continue
-                        if (method, template_path) not in already_implemented_pairs:
-                            already_implemented_pairs.add((method, template_path))
-                            discovered_routes.append(
-                                {
-                                    "method": method,
-                                    "path": template_path,
-                                    "framework": "live-http-probe",
-                                    "source_file": f"HTTP {p_status} on {concrete_path} (No public OpenAPI spec on server)",
-                                    "line_number": None,
-                                }
-                            )
-                            synthesized_probe_logs.append(
-                                {
-                                    "timestamp": now_ts,
-                                    "method": method,
-                                    "path": concrete_path,
-                                    "status_code": p_status,
-                                }
-                            )
+                    if is_specless_mode:
+                        synthesized_probe_logs.append(
+                            {
+                                "timestamp": now_ts,
+                                "method": method,
+                                "path": concrete_path,
+                                "status_code": p_status,
+                            }
+                        )
+
+                    # If an API version prefix (like /api, /api/v1, /api/v2, /v1, /v2) is active in Spec-less mode,
+                    # expand common REST sub-resources under that prefix for the next hop
+                    if is_specless_mode and hop < max_crawl_depth - 1:
+                        prefix_candidate: Optional[str] = None
+                        if canon_norm in ("/api", "/api/v1", "/api/v2", "/v1", "/v2"):
+                            prefix_candidate = canon_norm
+                        else:
+                            parts = [s for s in canon_norm.split("/") if s]
+                            if len(parts) >= 2 and parts[0] == "api" and parts[1].startswith("v"):
+                                prefix_candidate = f"/{parts[0]}/{parts[1]}"
+                            elif len(parts) >= 1 and parts[0] in ("v1", "v2", "v3", "api"):
+                                prefix_candidate = f"/{parts[0]}"
+
+                        if prefix_candidate and prefix_candidate not in expanded_prefixes:
+                            expanded_prefixes.add(prefix_candidate)
+                            for sub_res in PREFIX_SUBRESOURCE_CANDIDATES:
+                                next_hop_candidates.append((f"{prefix_candidate}/{sub_res}", False))
+
+            # Sort and enqueue next hop candidates deterministically
+            for cand_path, is_conc in sorted(set(next_hop_candidates)):
+                _enqueue_target("GET", cand_path, is_concrete=is_conc, is_explicit=False)
 
         if is_specless_mode and not discovered_routes and initial_user_url_response is not None:
             st, _ = initial_user_url_response
@@ -659,9 +1137,21 @@ def collect_live_api_sources(
                 }
             )
 
+        # Sort discovered probe routes and synthesized logs deterministically so repeated scans are 100% consistent
+        discovered_routes.sort(
+            key=lambda r: (
+                0 if r.get("framework") != "live-http-probe" else 1,
+                str(r.get("path") or ""),
+                str(r.get("method") or ""),
+                str(r.get("source_file") or ""),
+                int(r.get("line_number") or 0),
+            )
+        )
+        synthesized_probe_logs.sort(key=lambda l: (str(l.get("path") or ""), str(l.get("method") or "")))
+
         notes.append(
-            f"Actively probed {probed_count} endpoint(s) against {resolved_base}; "
-            f"discovered {len(discovered_routes)} live route(s)."
+            f"Actively probed {probed_count} endpoint(s) across {crawl_hops_executed} discovery hop(s) "
+            f"against {resolved_base}; discovered {len(discovered_routes)} live route(s)."
         )
 
     routes_bytes = json.dumps({"routes": discovered_routes}, indent=2).encode("utf-8")
@@ -674,7 +1164,15 @@ def collect_live_api_sources(
         if not is_specless_mode:
             introspect_logs_url = _append_url_path_and_params(resolved_base, "/_autopsy/logs", query_params)
             try:
-                l_status, l_body = http_req("GET", introspect_logs_url, headers, timeout_seconds)
+                l_status, l_body = _request_with_retry(
+                    http_req,
+                    "GET",
+                    introspect_logs_url,
+                    scan_headers,
+                    timeout_seconds,
+                    max_attempts=2,
+                    backoff_seconds=retry_backoff,
+                )
                 if l_status == 200 and l_body:
                     l_json = json.loads(l_body.decode("utf-8-sig"))
                     raw_logs = l_json.get("logs") if isinstance(l_json, dict) else (l_json if isinstance(l_json, list) else None)

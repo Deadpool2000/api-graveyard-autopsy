@@ -74,10 +74,10 @@ class EndpointObservation(BaseModel):
 class AIExplanationSchema(BaseModel):
     """Strict Pydantic schema for Gemini investigation output (FR-10)."""
 
-    summary: str = Field(..., min_length=5, max_length=1200)
-    evidence_interpretation: List[str] = Field(..., min_length=1, max_length=8)
-    recommended_checks: List[str] = Field(..., min_length=1, max_length=8)
-    caveats: List[str] = Field(..., min_length=1, max_length=6)
+    summary: str = Field(..., min_length=5, max_length=2500)
+    evidence_interpretation: List[str] = Field(..., min_length=1, max_length=12)
+    recommended_checks: List[str] = Field(..., min_length=1, max_length=12)
+    caveats: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class AIExplanationRecord(AIExplanationSchema):
@@ -114,10 +114,10 @@ class Finding(BaseModel):
 
 
 class ExecutiveSummarySchema(BaseModel):
-    headline: str = Field(..., min_length=5, max_length=400)
-    key_observations: List[str] = Field(..., min_length=1, max_length=6)
-    priority_focus_areas: List[str] = Field(..., min_length=1, max_length=6)
-    caveats: List[str] = Field(..., min_length=1, max_length=5)
+    headline: str = Field(..., min_length=5, max_length=1000)
+    key_observations: List[str] = Field(..., min_length=1, max_length=10)
+    priority_focus_areas: List[str] = Field(..., min_length=1, max_length=10)
+    caveats: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class ExecutiveSummaryRecord(ExecutiveSummarySchema):
@@ -131,16 +131,16 @@ class ExecutiveSummaryRecord(ExecutiveSummarySchema):
 
 class InvestigationPlanStep(BaseModel):
     priority_order: int = Field(..., ge=1, le=20)
-    title: str = Field(..., min_length=3, max_length=250)
-    rationale: str = Field(..., min_length=5, max_length=600)
+    title: str = Field(..., min_length=3, max_length=400)
+    rationale: str = Field(..., min_length=5, max_length=1200)
     finding_ids: List[str] = Field(default_factory=list)
-    verification_criteria: List[str] = Field(..., min_length=1, max_length=6)
+    verification_criteria: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class InvestigationPlanSchema(BaseModel):
-    overview: str = Field(..., min_length=5, max_length=800)
-    steps: List[InvestigationPlanStep] = Field(..., min_length=1, max_length=10)
-    general_caveats: List[str] = Field(..., min_length=1, max_length=6)
+    overview: str = Field(..., min_length=5, max_length=1600)
+    steps: List[InvestigationPlanStep] = Field(..., min_length=1, max_length=12)
+    general_caveats: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class InvestigationPlanRecord(InvestigationPlanSchema):
@@ -157,10 +157,10 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponseSchema(BaseModel):
-    answer: str = Field(..., min_length=5, max_length=2000)
+    answer: str = Field(..., min_length=5, max_length=3000)
     referenced_finding_ids: List[str] = Field(default_factory=list)
     supporting_evidence: List[str] = Field(default_factory=list)
-    caveats: List[str] = Field(..., min_length=1, max_length=5)
+    caveats: List[str] = Field(..., min_length=1, max_length=10)
 
 
 class ChatResponseRecord(ChatResponseSchema):

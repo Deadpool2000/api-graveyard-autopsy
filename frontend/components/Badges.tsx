@@ -1,4 +1,5 @@
 import React from "react";
+import { Check, Minus, X } from "lucide-react";
 
 export function getMethodStyle(method: string): string {
   switch (method.toUpperCase()) {
@@ -57,47 +58,68 @@ export function MethodBadge({ method }: { method: string }) {
 export function SourceMatrixPills({
   sourcesPresent,
   sourcesSupplied,
+  requestCount,
 }: {
   sourcesPresent: string[];
   sourcesSupplied?: string[];
+  requestCount?: number;
 }) {
   const items = [
-    { key: "openapi", label: "Docs", title: "OpenAPI Spec" },
-    { key: "routes", label: "Code", title: "Backend Routes" },
-    { key: "logs", label: "Logs", title: "Traffic Logs" },
+    { key: "openapi", label: "Docs", title: "OpenAPI Specification" },
+    { key: "routes", label: "Code", title: "Backend Route Inventory" },
+    { key: "logs", label: "Traffic", title: "Runtime Traffic Logs" },
   ];
 
   return (
-    <div className="inline-flex items-center gap-1.5">
+    <div className="inline-flex flex-wrap items-center gap-1.5">
       {items.map((item) => {
-        const isSupplied = !sourcesSupplied || sourcesSupplied.includes(item.key);
+        const isSupplied =
+          !sourcesSupplied || sourcesSupplied.includes(item.key);
         const isPresent = sourcesPresent.includes(item.key);
 
-        let cls = "bg-zinc-900 text-zinc-500 border-zinc-800";
         if (!isSupplied) {
-          cls = "bg-zinc-950 text-zinc-600 border-zinc-900 line-through";
-        } else if (isPresent) {
-          cls = "bg-zinc-800/90 text-zinc-200 border-zinc-700";
+          return (
+            <span
+              key={item.key}
+              title={`${item.title}: Not uploaded`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border bg-zinc-950 text-zinc-600 border-zinc-900"
+            >
+              <Minus className="h-3 w-3 text-zinc-600" />
+              <span>{item.label}</span>
+            </span>
+          );
+        }
+
+        if (isPresent) {
+          const extra =
+            item.key === "logs" &&
+            typeof requestCount === "number" &&
+            requestCount > 0
+              ? ` (${requestCount})`
+              : "";
+          return (
+            <span
+              key={item.key}
+              title={`${item.title}: Found${extra}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/25"
+            >
+              <Check className="h-3 w-3 text-emerald-400 stroke-[2.5]" />
+              <span>
+                {item.label}
+                {extra}
+              </span>
+            </span>
+          );
         }
 
         return (
           <span
             key={item.key}
-            title={`${item.title}: ${
-              !isSupplied ? "Not uploaded" : isPresent ? "Found" : "Missing"
-            }`}
-            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium border ${cls}`}
+            title={`${item.title}: Missing`}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium border bg-zinc-900/90 text-zinc-400 border-zinc-800"
           >
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                !isSupplied
-                  ? "bg-zinc-700"
-                  : isPresent
-                  ? "bg-emerald-400"
-                  : "bg-zinc-600"
-              }`}
-            />
-            {item.label}
+            <X className="h-3 w-3 text-rose-400/80 stroke-[2.5]" />
+            <span>No {item.label}</span>
           </span>
         );
       })}

@@ -94,7 +94,25 @@ async def record_live_access_log(request: Request, call_next: Any) -> Any:
     elapsed_ms = round((time.perf_counter() - start) * 1000.0, 2)
 
     path = request.url.path
-    is_meta = path.startswith("/_autopsy") or path in ("/health", "/openapi.json", "/docs", "/redoc")
+    is_meta = (
+        path.startswith("/_autopsy")
+        or path in (
+            "/health",
+            "/openapi.json",
+            "/swagger.json",
+            "/api/openapi.json",
+            "/api/v1/openapi.json",
+            "/api/v2/openapi.json",
+            "/v1/openapi.json",
+            "/v2/openapi.json",
+            "/v3/api-docs",
+            "/docs/openapi.json",
+            "/openapi.yaml",
+            "/swagger.yaml",
+            "/docs",
+            "/redoc",
+        )
+    )
     probe_mode = request.headers.get("X-Autopsy-Log-Ignore", "false").lower() == "true"
 
     if not is_meta and not probe_mode:

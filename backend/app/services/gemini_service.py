@@ -533,12 +533,20 @@ def generate_deterministic_executive_summary(
     )
 
 
+FALLBACK_GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3-flash-preview",
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+]
+
+
 def _call_gemini_structured(
     prompt: str,
     schema_cls: Type[T],
 ) -> Tuple[Optional[T], Optional[str]]:
     """
-    Invoke Google Gemini API with timeout, structured JSON schema validation, and rate-limit handling.
+    Invoke Google Gemini API with timeout, structured JSON schema validation, model fallback, and rate-limit handling.
     Returns (validated_model_or_None, error_message_or_None).
     """
     settings = get_settings()
@@ -548,7 +556,12 @@ def _call_gemini_structured(
     if not store.check_rate_limit("gemini_global", max_calls=20, window_seconds=60):
         return None, "Local free-tier rate limit reached (max 20 AI requests/min). Showing deterministic fallback."
 
-    def _invoke() -> T:
+    candidate_models: List[str] = [settings.gemini_model]
+    for m in FALLBACK_GEMINI_MODELS:
+        if m not in candidate_models:
+            candidate_models.append(m)
+
+    def _invoke(model_name: str) -> T:
         from google import genai
         from google.genai import types
 
@@ -557,14 +570,14 @@ def _call_gemini_structured(
             http_options=types.HttpOptions(timeout=settings.gemini_timeout_seconds * 1000),
         )
         response = client.models.generate_content(
-            model=settings.gemini_model,
+            model=model_name,
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
                 response_mime_type="application/json",
                 response_schema=schema_cls,
                 temperature=0.1,
-                max_output_tokens=settings.gemini_max_output_tokens,
+                max_output_tokens=max(4096, settings.gemini_max_output_tokens),
             ),
         )
         raw_text = (response.text or "").strip()
@@ -572,32 +585,43 @@ def _call_gemini_structured(
             raise ValueError("Empty response received from Gemini API.")
         return schema_cls.model_validate_json(raw_text)
 
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_invoke)
-            validated = future.result(timeout=settings.gemini_timeout_seconds + 2)
-            return validated, None
-    except concurrent.futures.TimeoutError:
+    last_exc: Optional[Exception] = None
+    for model_name in candidate_models:
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(_invoke, model_name)
+                validated = future.result(timeout=settings.gemini_timeout_seconds + 2)
+                return validated, None
+        except concurrent.futures.TimeoutError as tex:
+            last_exc = tex
+            continue
+        except Exception as exc:
+            last_exc = exc
+            err_lower = str(exc).lower()
+            if "api_key_invalid" in err_lower or "401" in err_lower or "invalid api key" in err_lower:
+                return (
+                    None,
+                    "Gemini API key was rejected by Google AI Studio. Check GEMINI_API_KEY in .env. Showing deterministic fallback.",
+                )
+            # For 404 (retired model), 503 (high demand), or schema truncation, try next candidate model
+            continue
+
+    if isinstance(last_exc, concurrent.futures.TimeoutError):
         return None, f"Gemini API request timed out after {settings.gemini_timeout_seconds}s. Showing deterministic fallback."
-    except Exception as exc:
-        err_str = str(exc)
-        err_lower = err_str.lower()
-        if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower or "rate" in err_lower:
-            return (
-                None,
-                "Gemini API free-tier quota or rate limit reached (HTTP 429). Showing deterministic fallback.",
-            )
-        if "api_key_invalid" in err_lower or "401" in err_lower or "403" in err_lower or "invalid api key" in err_lower:
-            return (
-                None,
-                "Gemini API key was rejected by Google AI Studio. Check GEMINI_API_KEY in .env. Showing deterministic fallback.",
-            )
-        if "404" in err_lower or "not found" in err_lower:
-            return (
-                None,
-                f"Configured GEMINI_MODEL ('{settings.gemini_model}') was not found or unavailable. Showing deterministic fallback.",
-            )
-        return None, "Gemini API temporarily unavailable. Showing deterministic fallback."
+
+    err_str = str(last_exc) if last_exc else ""
+    err_lower = err_str.lower()
+    if "429" in err_lower or "quota" in err_lower or "resource_exhausted" in err_lower or "rate" in err_lower:
+        return (
+            None,
+            "Gemini API free-tier quota or rate limit reached (HTTP 429). Showing deterministic fallback.",
+        )
+    if "404" in err_lower or "not found" in err_lower:
+        return (
+            None,
+            f"Configured GEMINI_MODEL ('{settings.gemini_model}') was not found or unavailable. Showing deterministic fallback.",
+        )
+    return None, "Gemini API temporarily unavailable. Showing deterministic fallback."
 
 
 def investigate_finding_with_ai(analysis: AnalysisRecord, finding: Finding) -> AIExplanationRecord:
@@ -612,9 +636,10 @@ def investigate_finding_with_ai(analysis: AnalysisRecord, finding: Finding) -> A
     if cached_data:
         try:
             record = AIExplanationRecord.model_validate(cached_data)
-            record.cached = True
-            record.status_message = f"Loaded cached Gemini explanation ({record.model or settings.gemini_model})."
-            return record
+            if not record.is_fallback:
+                record.cached = True
+                record.status_message = f"Loaded cached Gemini explanation ({record.model or settings.gemini_model})."
+                return record
         except Exception:
             pass
 
@@ -669,9 +694,10 @@ def ask_analysis_chat(analysis: AnalysisRecord, question: str) -> ChatResponseRe
     if cached_data:
         try:
             record = ChatResponseRecord.model_validate(cached_data)
-            record.cached = True
-            record.status_message = f"Loaded cached Gemini answer ({record.model or settings.gemini_model})."
-            return record
+            if not record.is_fallback:
+                record.cached = True
+                record.status_message = f"Loaded cached Gemini answer ({record.model or settings.gemini_model})."
+                return record
         except Exception:
             pass
 
@@ -730,9 +756,10 @@ def generate_investigation_plan_with_ai(analysis: AnalysisRecord) -> Investigati
     if cached_data:
         try:
             record = InvestigationPlanRecord.model_validate(cached_data)
-            record.cached = True
-            record.status_message = f"Loaded cached Gemini investigation plan ({record.model or settings.gemini_model})."
-            return record
+            if not record.is_fallback:
+                record.cached = True
+                record.status_message = f"Loaded cached Gemini investigation plan ({record.model or settings.gemini_model})."
+                return record
         except Exception:
             pass
 
@@ -796,9 +823,10 @@ def generate_executive_summary_with_ai(analysis: AnalysisRecord) -> ExecutiveSum
     if cached_data:
         try:
             record = ExecutiveSummaryRecord.model_validate(cached_data)
-            record.cached = True
-            record.status_message = f"Loaded cached Gemini executive summary ({record.model or settings.gemini_model})."
-            return record
+            if not record.is_fallback:
+                record.cached = True
+                record.status_message = f"Loaded cached Gemini executive summary ({record.model or settings.gemini_model})."
+                return record
         except Exception:
             pass
 

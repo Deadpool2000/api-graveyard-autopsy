@@ -81,11 +81,12 @@ def _build_evidence_and_checks(
     if "logs" in obs.sources_present:
         orig_lg = ", ".join(obs.original_paths.get("logs", [obs.normalized_path])[:3])
         status_summary = ", ".join(f"{k}: {v}" for k, v in sorted(obs.status_code_counts.items()))
-        seen_range = (
-            f" between {obs.first_seen} and {obs.last_seen}"
-            if obs.first_seen and obs.last_seen
-            else ""
-        )
+        if obs.first_seen and obs.last_seen:
+            f_clean = obs.first_seen.split(".")[0].replace("T", " ").replace("Z", "") + " UTC"
+            l_clean = obs.last_seen.split(".")[0].replace("T", " ").replace("Z", "") + " UTC"
+            seen_range = f" at {f_clean}" if f_clean == l_clean else f" between {f_clean} and {l_clean}"
+        else:
+            seen_range = ""
         evidence.append(
             f"Observed {obs.request_count} request(s) in logs (sample path: `{orig_lg}`; status codes: {status_summary or 'N/A'}){seen_range}."
         )

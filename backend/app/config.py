@@ -72,17 +72,17 @@ class Settings:
             return file_val or env_val or default
 
         self.gemini_api_key: str = get_val("GEMINI_API_KEY", "")
-        self.gemini_model: str = get_val("GEMINI_MODEL", "gemini-2.5-flash")
+        self.gemini_model: str = get_val("GEMINI_MODEL", "gemini-3.8-flash")
         self.gemini_enabled: bool = get_val("GEMINI_ENABLED", "true").lower() in ("1", "true", "yes", "on")
         try:
-            self.gemini_timeout_seconds: int = max(3, min(60, int(get_val("GEMINI_TIMEOUT_SECONDS", "15"))))
+            self.gemini_timeout_seconds: int = max(3, min(60, int(get_val("GEMINI_TIMEOUT_SECONDS", "35"))))
         except ValueError:
-            self.gemini_timeout_seconds = 15
+            self.gemini_timeout_seconds = 35
 
         try:
-            self.gemini_max_output_tokens: int = max(256, min(4096, int(get_val("GEMINI_MAX_OUTPUT_TOKENS", "1024"))))
+            self.gemini_max_output_tokens: int = max(256, min(8192, int(get_val("GEMINI_MAX_OUTPUT_TOKENS", "4096"))))
         except ValueError:
-            self.gemini_max_output_tokens = 1024
+            self.gemini_max_output_tokens = 4096
 
         self.redis_url: str = get_val("REDIS_URL", "redis://redis:6379/0")
         try:

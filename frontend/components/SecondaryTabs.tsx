@@ -5,6 +5,7 @@ import {
   AlertCircle,
   Loader2,
   Send,
+  Sparkles,
 } from "lucide-react";
 import {
   AnalysisSummary,
@@ -47,7 +48,7 @@ export function PlanAndSummaryTab({
             Action Plan & Executive Summary
           </h2>
           <p className="text-sm text-zinc-400">
-            Generate a step-by-step verification plan or high-level summary of your findings.
+            Generate a step-by-step verification plan or high-level summary of your findings using Gemini AI.
           </p>
         </div>
 
@@ -58,7 +59,11 @@ export function PlanAndSummaryTab({
             disabled={isGeneratingPlan}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-zinc-100 hover:bg-white text-zinc-950 transition disabled:opacity-50"
           >
-            {isGeneratingPlan && <Loader2 className="h-4 w-4 animate-spin" />}
+            {isGeneratingPlan ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="h-4 w-4 text-emerald-600" />
+            )}
             <span>
               {investigationPlan ? "Refresh Action Plan" : "Generate Action Plan"}
             </span>
@@ -70,8 +75,10 @@ export function PlanAndSummaryTab({
             disabled={isGeneratingSummary}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition disabled:opacity-50"
           >
-            {isGeneratingSummary && (
+            {isGeneratingSummary ? (
               <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Sparkles className="h-4 w-4 text-emerald-400" />
             )}
             <span>
               {executiveSummary ? "Refresh Summary" : "Generate Summary"}
@@ -86,7 +93,7 @@ export function PlanAndSummaryTab({
             No plan or summary generated yet.
           </p>
           <p className="text-sm text-zinc-400">
-            Click <strong className="text-zinc-200">Generate Action Plan</strong> above to create a prioritized checklist for your team.
+            Click <strong className="text-zinc-200">Generate Action Plan</strong> or <strong className="text-zinc-200">Generate Summary</strong> above to run Gemini AI over your findings.
           </p>
         </div>
       )}
@@ -94,9 +101,25 @@ export function PlanAndSummaryTab({
       {/* Executive Summary Card */}
       {executiveSummary && (
         <div className="rounded-xl border border-zinc-800 bg-[#111113] p-6 space-y-5">
-          <h3 className="text-base font-semibold text-white border-b border-zinc-800 pb-3">
-            Executive Summary
-          </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+            <h3 className="text-base font-semibold text-white">
+              Executive Summary
+            </h3>
+            <span
+              className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border ${
+                !executiveSummary.is_fallback
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                  : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>
+                {!executiveSummary.is_fallback
+                  ? `Gemini AI (${executiveSummary.model || "live"})`
+                  : "Deterministic Fallback"}
+              </span>
+            </span>
+          </div>
 
           <p className="text-base font-medium text-zinc-100 leading-relaxed">
             {executiveSummary.headline}
@@ -125,15 +148,37 @@ export function PlanAndSummaryTab({
               </ul>
             </div>
           </div>
+
+          {executiveSummary.status_message && (
+            <p className="text-xs text-zinc-500">
+              {executiveSummary.status_message}
+            </p>
+          )}
         </div>
       )}
 
       {/* Prioritized Investigation Plan */}
       {investigationPlan && (
         <div className="rounded-xl border border-zinc-800 bg-[#111113] p-6 space-y-5">
-          <h3 className="text-base font-semibold text-white border-b border-zinc-800 pb-3">
-            Prioritized Action Plan
-          </h3>
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-3">
+            <h3 className="text-base font-semibold text-white">
+              Prioritized Action Plan
+            </h3>
+            <span
+              className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border ${
+                !investigationPlan.is_fallback
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                  : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              <span>
+                {!investigationPlan.is_fallback
+                  ? `Gemini AI (${investigationPlan.model || "live"})`
+                  : "Deterministic Fallback"}
+              </span>
+            </span>
+          </div>
 
           <p className="text-sm text-zinc-300 leading-relaxed">
             {investigationPlan.overview}
@@ -175,6 +220,12 @@ export function PlanAndSummaryTab({
               </div>
             ))}
           </div>
+
+          {investigationPlan.status_message && (
+            <p className="text-xs text-zinc-500">
+              {investigationPlan.status_message}
+            </p>
+          )}
         </div>
       )}
     </div>
