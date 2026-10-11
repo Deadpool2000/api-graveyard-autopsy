@@ -18,6 +18,8 @@ from app.schemas.models import (
     InvestigationPlanRecord,
     InvestigationPlanSchema,
     InvestigationPlanStep,
+    SuggestedQuestionsRecord,
+    SuggestedQuestionsSchema,
 )
 from app.services.normalizer import redact_sensitive_text
 from app.store import store
@@ -863,3 +865,177 @@ def generate_executive_summary_with_ai(analysis: AnalysisRecord) -> ExecutiveSum
     )
     store.set_cached_ai_response(cache_key, record.model_dump())
     return record
+
+
+def generate_deterministic_suggested_questions(
+    analysis: AnalysisRecord,
+    status_message: str = "Generated dynamically from detected API findings.",
+) -> SuggestedQuestionsRecord:
+    """
+    Build tailored suggested questions grounded in the actual endpoints and categories found in this analysis.
+    """
+    questions: List[str] = []
+    findings = analysis.findings
+
+    if not findings:
+        questions = [
+            f"What sources were compared in '{analysis.name}'?",
+            "Why were zero discrepancies detected across the supplied API sources?",
+            "What additional logs or route inventories should we supply to expand coverage?",
+        ]
+        return SuggestedQuestionsRecord(
+            questions=questions,
+            provider="deterministic-fallback",
+            model=None,
+            is_fallback=True,
+            cached=False,
+            generated_at=_now_iso(),
+            status_message=status_message,
+        )
+
+    top = findings[0]
+    questions.append(
+        f"Why is {top.method} {top.path} ({top.id}) scored at {top.review_priority_score}/100 and what should we verify first?"
+    )
+
+    undoc_active = [
+        f for f in findings if f.category in ("Observed but undocumented", "Implemented but undocumented")
+    ]
+    if undoc_active:
+        u = undoc_active[0]
+        if u.id != top.id or len(undoc_active) == 1:
+            target = undoc_active[1] if (u.id == top.id and len(undoc_active) > 1) else u
+            if target.request_count > 0:
+                questions.append(
+                    f"What are the security and contract risks of undocumented route {target.method} {target.path} ({target.request_count} requests)?"
+                )
+            else:
+                questions.append(
+                    f"Why is {target.method} {target.path} ({target.id}) implemented in code but missing from OpenAPI?"
+                )
+
+    ghosts = [f for f in findings if f.category == "Documented but not implemented"]
+    if ghosts:
+        g = ghosts[0]
+        target = ghosts[1] if (g.id == top.id and len(ghosts) > 1) else g
+        questions.append(
+            f"Why is {target.method} {target.path} ({target.id}) declared in OpenAPI but missing from the route inventory?"
+        )
+
+    unobserved = [
+        f for f in findings if f.category in ("Implemented but not observed", "Documented but not observed")
+    ]
+    if unobserved:
+        z = unobserved[0]
+        target = unobserved[1] if (z.id == top.id and len(unobserved) > 1) else z
+        questions.append(
+            f"Why had {target.method} {target.path} ({target.id}) zero observed requests, and what checks are needed before retirement?"
+        )
+
+    dq = [f for f in findings if f.category == "Data-quality issue"]
+    if dq and len(questions) < 4:
+        d = dq[0]
+        questions.append(
+            f"What data-quality or duplicate registration issue was detected on {d.method} {d.path} ({d.id})?"
+        )
+
+    # Deduplicate and ensure at least 3-4 finding-specific questions
+    unique_questions: List[str] = []
+    for q in questions:
+        if q not in unique_questions:
+            unique_questions.append(q)
+
+    for extra_f in findings[1:5]:
+        if len(unique_questions) >= 4:
+            break
+        candidate = (
+            f"What evidence and verification steps apply to {extra_f.method} {extra_f.path} ({extra_f.id} — {extra_f.category})?"
+        )
+        if candidate not in unique_questions:
+            unique_questions.append(candidate)
+
+    if len(unique_questions) < 3:
+        unique_questions.append(
+            "Why aren't endpoints with zero observed traffic automatically safe to delete?"
+        )
+
+    return SuggestedQuestionsRecord(
+        questions=unique_questions[:4],
+        provider="deterministic-fallback",
+        model=None,
+        is_fallback=True,
+        cached=False,
+        generated_at=_now_iso(),
+        status_message=status_message,
+    )
+
+
+def generate_suggested_questions_with_ai(
+    analysis: AnalysisRecord,
+    force_refresh: bool = False,
+) -> SuggestedQuestionsRecord:
+    """
+    Generate 4 context-aware suggested questions using Google Gemini grounded in the current analysis findings,
+    with Redis/SQLite caching and finding-aware deterministic fallback.
+    """
+    settings = get_settings()
+    context_payload = build_sanitized_analysis_context(analysis, max_findings=12)
+    cache_key = _compute_cache_key("suggested_questions", settings.gemini_model, context_payload)
+
+    if not force_refresh:
+        cached_data = store.get_cached_ai_response(cache_key)
+        if cached_data:
+            try:
+                record = SuggestedQuestionsRecord.model_validate(cached_data)
+                if not record.is_fallback:
+                    record.cached = True
+                    record.status_message = (
+                        f"Loaded cached Gemini questions ({record.model or settings.gemini_model})."
+                    )
+                    return record
+            except Exception:
+                pass
+
+    if not settings.is_gemini_configured:
+        return generate_deterministic_suggested_questions(
+            analysis,
+            status_message="Generated dynamically from your API findings (configure GEMINI_API_KEY for live Gemini questions).",
+        )
+
+    prompt = (
+        "Generate 4 concise, high-value investigative questions tailored specifically to the API findings in the "
+        "supplied JSON context. Each question MUST reference specific endpoints (e.g., GET /v1/...) or finding IDs "
+        "(e.g., FND-001) or specific lifecycle discrepancies present in this analysis so a backend engineer can click "
+        "a question to investigate their API. Keep each question under 115 characters and never imply an endpoint is "
+        "automatically safe to delete.\n\n"
+        f"SANITIZED_ANALYSIS_CONTEXT_JSON:\n{json.dumps(context_payload, indent=2)}"
+    )
+
+    validated, error_msg = _call_gemini_structured(prompt, SuggestedQuestionsSchema)
+    if validated is None or not validated.questions:
+        return generate_deterministic_suggested_questions(
+            analysis,
+            status_message=error_msg or "Generated dynamically from your API findings.",
+        )
+
+    cleaned_questions = [
+        _sanitize_text_guardrail(q.strip())
+        for q in validated.questions
+        if q and q.strip()
+    ][:4]
+
+    if len(cleaned_questions) < 3:
+        return generate_deterministic_suggested_questions(analysis)
+
+    record = SuggestedQuestionsRecord(
+        questions=cleaned_questions,
+        provider="gemini",
+        model=settings.gemini_model,
+        is_fallback=False,
+        cached=False,
+        generated_at=_now_iso(),
+        status_message=f"Generated by Google Gemini ({settings.gemini_model}) from your API findings.",
+    )
+    store.set_cached_ai_response(cache_key, record.model_dump())
+    return record
+

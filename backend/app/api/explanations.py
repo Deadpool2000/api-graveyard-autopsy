@@ -1,11 +1,12 @@
 from typing import Dict
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, status
 
 from app.schemas.models import ChatRequest
 from app.services.gemini_service import (
     ask_analysis_chat,
     generate_executive_summary_with_ai,
     generate_investigation_plan_with_ai,
+    generate_suggested_questions_with_ai,
     investigate_finding_with_ai,
 )
 from app.store import store
@@ -105,4 +106,27 @@ def create_investigation_plan(analysis_id: str) -> Dict[str, object]:
         "analysis_id": analysis.id,
         "investigation_plan": plan_record.model_dump(),
     }
+
+
+@router.post("/{analysis_id}/suggested-questions")
+def create_suggested_questions(
+    analysis_id: str,
+    refresh: bool = Query(default=False),
+) -> Dict[str, object]:
+    """
+    Generate AI-powered or finding-grounded suggested questions tailored to the current analysis findings.
+    """
+    analysis = store.get_analysis(analysis_id)
+    if analysis is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
+
+    questions_record = generate_suggested_questions_with_ai(analysis, force_refresh=refresh)
+    analysis.suggested_questions = questions_record
+    store.save_analysis(analysis)
+
+    return {
+        "analysis_id": analysis.id,
+        "suggested_questions": questions_record.model_dump(),
+    }
+
 

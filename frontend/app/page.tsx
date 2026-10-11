@@ -18,6 +18,7 @@ import {
   fetchFindings,
   generateExecutiveSummary,
   generateInvestigationPlan,
+  generateSuggestedQuestions,
   investigateFinding,
   simulateLiveTraffic,
   startDemoAnalysis,
@@ -28,6 +29,7 @@ import {
   ExecutiveSummaryRecord,
   Finding,
   InvestigationPlanRecord,
+  SuggestedQuestionsRecord,
 } from "@/lib/types";
 import {
   MethodBadge,
@@ -118,10 +120,14 @@ export default function AutopsyWorkbench() {
   const [isGeneratingSummary, setIsGeneratingSummary] =
     useState<boolean>(false);
   const [isGeneratingPlan, setIsGeneratingPlan] = useState<boolean>(false);
+  const [isGeneratingQuestions, setIsGeneratingQuestions] =
+    useState<boolean>(false);
   const [executiveSummary, setExecutiveSummary] =
     useState<ExecutiveSummaryRecord | null>(null);
   const [investigationPlan, setInvestigationPlan] =
     useState<InvestigationPlanRecord | null>(null);
+  const [suggestedQuestions, setSuggestedQuestions] =
+    useState<SuggestedQuestionsRecord | null>(null);
 
   // Grounded Q&A state
   const [chatQuestion, setChatQuestion] = useState<string>("");
@@ -184,12 +190,14 @@ export default function AutopsyWorkbench() {
     setSearchQuery("");
     setActiveTab("findings");
     setChatHistory([]);
+    setSuggestedQuestions(null);
 
     try {
       const fullRecord = await fetchAnalysis(record.id);
       setAnalysis(fullRecord);
       setExecutiveSummary(fullRecord.executive_summary || null);
       setInvestigationPlan(fullRecord.investigation_plan || null);
+      setSuggestedQuestions(fullRecord.suggested_questions || null);
       if (fullRecord.status === "completed") {
         const fRes = await fetchFindings(fullRecord.id);
         setFindings(fRes.findings);
@@ -215,6 +223,7 @@ export default function AutopsyWorkbench() {
         setAnalysis(null);
         setFindings([]);
         setSelectedFindingId(null);
+        setSuggestedQuestions(null);
         setAppView("history");
       }
     } catch (err) {
@@ -229,6 +238,7 @@ export default function AutopsyWorkbench() {
     setIsStartingAnalysis(true);
     setExecutiveSummary(null);
     setInvestigationPlan(null);
+    setSuggestedQuestions(null);
     setChatHistory([]);
     setSelectedCategory("all");
     setSelectedMethod("all");
@@ -268,6 +278,7 @@ export default function AutopsyWorkbench() {
     setIsStartingAnalysis(true);
     setExecutiveSummary(null);
     setInvestigationPlan(null);
+    setSuggestedQuestions(null);
     setChatHistory([]);
     setSelectedCategory("all");
     setSelectedMethod("all");
@@ -314,6 +325,7 @@ export default function AutopsyWorkbench() {
     setIsStartingAnalysis(true);
     setExecutiveSummary(null);
     setInvestigationPlan(null);
+    setSuggestedQuestions(null);
     setChatHistory([]);
     setSelectedCategory("all");
     setSelectedMethod("all");
@@ -524,6 +536,41 @@ export default function AutopsyWorkbench() {
       setIsGeneratingPlan(false);
     }
   };
+
+  const handleGenerateSuggestedQuestions = useCallback(
+    async (refresh: boolean = false) => {
+      if (!analysis || analysis.status !== "completed") return;
+      setIsGeneratingQuestions(true);
+      try {
+        const res = await generateSuggestedQuestions(analysis.id, refresh);
+        setSuggestedQuestions(res.suggested_questions);
+      } catch {
+        // Fallback to client-side finding-based questions silently
+      } finally {
+        setIsGeneratingQuestions(false);
+      }
+    },
+    [analysis]
+  );
+
+  // Automatically generate AI suggested questions when opening the "Ask AI" tab
+  useEffect(() => {
+    if (
+      activeTab === "chat" &&
+      analysis?.status === "completed" &&
+      !suggestedQuestions &&
+      !isGeneratingQuestions
+    ) {
+      handleGenerateSuggestedQuestions(false);
+    }
+  }, [
+    activeTab,
+    analysis?.id,
+    analysis?.status,
+    suggestedQuestions,
+    isGeneratingQuestions,
+    handleGenerateSuggestedQuestions,
+  ]);
 
   const handleAskQuestion = async (preset?: string) => {
     if (!analysis) return;
@@ -946,6 +993,12 @@ export default function AutopsyWorkbench() {
               {/* Tab 3: Grounded Q&A */}
               {activeTab === "chat" && (
                 <AskAnalysisTab
+                  findings={findings}
+                  suggestedQuestions={suggestedQuestions}
+                  isGeneratingQuestions={isGeneratingQuestions}
+                  onRefreshQuestions={() =>
+                    handleGenerateSuggestedQuestions(true)
+                  }
                   chatQuestion={chatQuestion}
                   setChatQuestion={setChatQuestion}
                   isAskingChat={isAskingChat}

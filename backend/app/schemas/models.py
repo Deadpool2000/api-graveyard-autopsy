@@ -173,6 +173,19 @@ class ChatResponseRecord(ChatResponseSchema):
     status_message: str = ""
 
 
+class SuggestedQuestionsSchema(BaseModel):
+    questions: List[str] = Field(..., min_length=3, max_length=6)
+
+
+class SuggestedQuestionsRecord(SuggestedQuestionsSchema):
+    provider: str = "deterministic-fallback"
+    model: Optional[str] = None
+    is_fallback: bool = True
+    cached: bool = False
+    generated_at: str = ""
+    status_message: str = ""
+
+
 class AnalysisRecord(BaseModel):
     id: str
     name: str
@@ -192,6 +205,7 @@ class AnalysisRecord(BaseModel):
     findings: List[Finding] = Field(default_factory=list)
     executive_summary: Optional[ExecutiveSummaryRecord] = None
     investigation_plan: Optional[InvestigationPlanRecord] = None
+    suggested_questions: Optional[SuggestedQuestionsRecord] = None
 
 
 class AnalysisPublicResponse(BaseModel):
@@ -211,5 +225,7 @@ class AnalysisPublicResponse(BaseModel):
     error_message: Optional[str] = None
     executive_summary: Optional[ExecutiveSummaryRecord] = None
     investigation_plan: Optional[InvestigationPlanRecord] = None
+    suggested_questions: Optional[SuggestedQuestionsRecord] = None
     ai_status: Dict[str, object] = Field(default_factory=dict)
+
 

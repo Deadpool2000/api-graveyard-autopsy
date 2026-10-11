@@ -12,6 +12,7 @@ from app.schemas.models import (
     ChatResponseSchema,
     InvestigationPlanSchema,
     InvestigationPlanStep,
+    SuggestedQuestionsSchema,
 )
 from app.services.log_parser import parse_logs_content
 from app.services.normalizer import match_or_normalize_log_path, normalize_template_path, redact_sensitive_text
@@ -318,3 +319,22 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         plan_res = client.post(f"/api/v1/analyses/{analysis_id}/investigation-plan")
         assert plan_res.status_code == 200
         assert len(plan_res.json()["investigation_plan"]["steps"]) == 1
+
+    mock_questions = SuggestedQuestionsSchema(
+        questions=[
+            "Why is FND-001 scored at top priority in this scan?",
+            "What authentication checks apply to undocumented route FND-002?",
+            "What should we verify before retiring unobserved route FND-003?",
+        ]
+    )
+    with (
+        patch.object(Settings, "is_gemini_configured", True),
+        patch("app.services.gemini_service._call_gemini_structured", return_value=(mock_questions, None)),
+    ):
+        sq_res = client.post(f"/api/v1/analyses/{analysis_id}/suggested-questions?refresh=true")
+        assert sq_res.status_code == 200
+        sq_body = sq_res.json()["suggested_questions"]
+        assert sq_body["is_fallback"] is False
+        assert sq_body["provider"] == "gemini"
+        assert len(sq_body["questions"]) == 3
+

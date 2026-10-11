@@ -127,6 +127,16 @@ export interface ChatResponseRecord {
   status_message: string;
 }
 
+export interface SuggestedQuestionsRecord {
+  questions: string[];
+  provider: string;
+  model: string | null;
+  is_fallback: boolean;
+  cached: boolean;
+  generated_at: string;
+  status_message: string;
+}
+
 export interface AIStatus {
   enabled: boolean;
   configured: boolean;
@@ -153,6 +163,7 @@ export interface AnalysisResponse {
   error_message: string | null;
   executive_summary: ExecutiveSummaryRecord | null;
   investigation_plan: InvestigationPlanRecord | null;
+  suggested_questions?: SuggestedQuestionsRecord | null;
   ai_status: AIStatus;
 }
 

@@ -5,6 +5,7 @@ import {
   ExecutiveSummaryRecord,
   Finding,
   InvestigationPlanRecord,
+  SuggestedQuestionsRecord,
 } from "./types";
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -197,6 +198,21 @@ export async function generateInvestigationPlan(
   return handleResponse(res);
 }
 
+export async function generateSuggestedQuestions(
+  analysisId: string,
+  refresh: boolean = false
+): Promise<{
+  analysis_id: string;
+  suggested_questions: SuggestedQuestionsRecord;
+}> {
+  const qs = refresh ? "?refresh=true" : "";
+  const res = await fetch(
+    `/api/v1/analyses/${encodeURIComponent(analysisId)}/suggested-questions${qs}`,
+    { method: "POST" }
+  );
+  return handleResponse(res);
+}
+
 export async function askAnalysisQuestion(
   analysisId: string,
   question: string
@@ -221,3 +237,4 @@ export function getReportDownloadUrl(
 ): string {
   return `/api/v1/analyses/${encodeURIComponent(analysisId)}/report?format=${format}`;
 }
+

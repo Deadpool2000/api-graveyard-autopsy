@@ -4,6 +4,7 @@ import React from "react";
 import {
   AlertCircle,
   Loader2,
+  RefreshCw,
   Send,
   Sparkles,
 } from "lucide-react";
@@ -11,16 +12,89 @@ import {
   AnalysisSummary,
   ChatResponseRecord,
   ExecutiveSummaryRecord,
+  Finding,
   InvestigationPlanRecord,
   SourceFileMetadata,
+  SuggestedQuestionsRecord,
 } from "@/lib/types";
 import { getReportDownloadUrl } from "@/lib/api";
 
-const PRESET_QUESTIONS = [
-  "Which findings should I investigate first, and why?",
-  "Which undocumented endpoints are actively receiving traffic?",
-  "Why aren't unobserved endpoints automatically safe to delete?",
-];
+function buildFindingBasedQuestions(findings: Finding[]): string[] {
+  if (!findings || findings.length === 0) {
+    return [
+      "What sources were compared in this analysis?",
+      "Why were zero discrepancies detected across the supplied API sources?",
+      "What additional logs or route inventories should we supply to expand coverage?",
+    ];
+  }
+
+  const questions: string[] = [];
+  const top = findings[0];
+  questions.push(
+    `Why is ${top.method} ${top.path} (${top.id}) scored at ${top.review_priority_score}/100 and what should we verify first?`
+  );
+
+  const undoc = findings.filter(
+    (f) =>
+      f.category === "Observed but undocumented" ||
+      f.category === "Implemented but undocumented"
+  );
+  if (undoc.length > 0) {
+    const target = undoc[0].id === top.id && undoc.length > 1 ? undoc[1] : undoc[0];
+    if (target.request_count > 0) {
+      questions.push(
+        `What are the security and contract risks of undocumented route ${target.method} ${target.path} (${target.request_count} requests)?`
+      );
+    } else {
+      questions.push(
+        `Why is ${target.method} ${target.path} (${target.id}) implemented in code but missing from OpenAPI?`
+      );
+    }
+  }
+
+  const ghosts = findings.filter(
+    (f) => f.category === "Documented but not implemented"
+  );
+  if (ghosts.length > 0) {
+    const target =
+      ghosts[0].id === top.id && ghosts.length > 1 ? ghosts[1] : ghosts[0];
+    questions.push(
+      `Why is ${target.method} ${target.path} (${target.id}) declared in OpenAPI but missing from the route inventory?`
+    );
+  }
+
+  const unobserved = findings.filter(
+    (f) =>
+      f.category === "Implemented but not observed" ||
+      f.category === "Documented but not observed"
+  );
+  if (unobserved.length > 0) {
+    const target =
+      unobserved[0].id === top.id && unobserved.length > 1
+        ? unobserved[1]
+        : unobserved[0];
+    questions.push(
+      `Why had ${target.method} ${target.path} (${target.id}) zero observed requests, and what checks are needed before retirement?`
+    );
+  }
+
+  const unique = Array.from(new Set(questions));
+  for (const extra of findings.slice(1, 5)) {
+    if (unique.length >= 4) break;
+    const candidate = `What evidence and verification steps apply to ${extra.method} ${extra.path} (${extra.id} — ${extra.category})?`;
+    if (!unique.includes(candidate)) {
+      unique.push(candidate);
+    }
+  }
+
+  if (unique.length < 3) {
+    unique.push(
+      "Why aren't endpoints with zero observed traffic automatically safe to delete?"
+    );
+  }
+
+  return unique.slice(0, 4);
+}
 
 export function PlanAndSummaryTab({
   executiveSummary,
@@ -233,6 +307,10 @@ export function PlanAndSummaryTab({
 }
 
 export function AskAnalysisTab({
+  findings = [],
+  suggestedQuestions,
+  isGeneratingQuestions = false,
+  onRefreshQuestions,
   chatQuestion,
   setChatQuestion,
   isAskingChat,
@@ -240,6 +318,10 @@ export function AskAnalysisTab({
   onAskQuestion,
   onJumpToFinding,
 }: {
+  findings?: Finding[];
+  suggestedQuestions?: SuggestedQuestionsRecord | null;
+  isGeneratingQuestions?: boolean;
+  onRefreshQuestions?: () => void;
   chatQuestion: string;
   setChatQuestion: (v: string) => void;
   isAskingChat: boolean;
@@ -247,27 +329,73 @@ export function AskAnalysisTab({
   onAskQuestion: (preset?: string) => void;
   onJumpToFinding: (findingId: string) => void;
 }) {
+  const activeQuestions =
+    suggestedQuestions?.questions && suggestedQuestions.questions.length > 0
+      ? suggestedQuestions.questions
+      : buildFindingBasedQuestions(findings);
+
+  const isLiveAiQuestions =
+    suggestedQuestions && !suggestedQuestions.is_fallback;
+
   return (
     <div className="max-w-4xl space-y-6">
       <div className="rounded-xl border border-zinc-800 bg-[#111113] p-6 space-y-4">
-        <div className="space-y-1">
-          <h2 className="text-lg font-semibold text-white">
-            Ask About This Analysis
-          </h2>
-          <p className="text-sm text-zinc-400">
-            Ask questions about your endpoints, traffic logs, or where to start.
-          </p>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="space-y-1">
+            <h2 className="text-lg font-semibold text-white">
+              Ask About This Analysis
+            </h2>
+            <p className="text-sm text-zinc-400">
+              Click an AI-generated question tailored to your detected API findings, or ask your own.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <span
+              className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border ${
+                isLiveAiQuestions
+                  ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                  : "bg-zinc-900 border-zinc-800 text-zinc-300"
+              }`}
+            >
+              <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
+              <span>
+                {isGeneratingQuestions
+                  ? "Generating AI Questions..."
+                  : isLiveAiQuestions
+                  ? `Gemini AI Questions (${suggestedQuestions?.model || "live"})`
+                  : "Finding-Based Questions"}
+              </span>
+            </span>
+
+            {onRefreshQuestions && (
+              <button
+                type="button"
+                onClick={onRefreshQuestions}
+                disabled={isGeneratingQuestions}
+                title="Regenerate suggested questions with Gemini AI"
+                className="inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${
+                    isGeneratingQuestions ? "animate-spin text-emerald-400" : ""
+                  }`}
+                />
+                <span>Refresh</span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Preset Question Chips */}
+        {/* Dynamic AI / Finding Question Chips */}
         <div className="flex flex-wrap items-center gap-2">
-          {PRESET_QUESTIONS.map((q) => (
+          {activeQuestions.map((q) => (
             <button
               key={q}
               type="button"
               onClick={() => onAskQuestion(q)}
               disabled={isAskingChat}
-              className="text-sm px-3.5 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition disabled:opacity-50 text-left"
+              className="text-sm px-3.5 py-2 rounded-lg bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 hover:border-emerald-500/40 transition disabled:opacity-50 text-left"
             >
               {q}
             </button>
@@ -316,8 +444,24 @@ export function AskAnalysisTab({
               key={idx}
               className="rounded-xl border border-zinc-800 bg-[#111113] p-5 space-y-3 text-sm"
             >
-              <div className="font-semibold text-white border-b border-zinc-800/80 pb-3">
-                Q: {item.question}
+              <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800/80 pb-3">
+                <div className="font-semibold text-white">
+                  Q: {item.question}
+                </div>
+                <span
+                  className={`inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded border ${
+                    !item.is_fallback
+                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                      : "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                  }`}
+                >
+                  <Sparkles className="h-3 w-3" />
+                  <span>
+                    {!item.is_fallback
+                      ? `Gemini AI (${item.model || "live"})`
+                      : "Deterministic Lookup"}
+                  </span>
+                </span>
               </div>
 
               <p className="text-zinc-200 leading-relaxed">{item.answer}</p>

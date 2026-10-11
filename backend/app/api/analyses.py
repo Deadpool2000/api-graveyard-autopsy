@@ -60,6 +60,7 @@ def _to_public_response(record: AnalysisRecord) -> AnalysisPublicResponse:
         error_message=record.error_message,
         executive_summary=record.executive_summary,
         investigation_plan=record.investigation_plan,
+        suggested_questions=record.suggested_questions,
         ai_status=_build_ai_status(),
     )
 
