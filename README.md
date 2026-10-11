@@ -13,7 +13,7 @@ It combines deterministic Python rule evaluation and heuristic review-priority s
 The project runs in Docker Compose with **5 dedicated containers** optimized behind **Nginx**:
 
 ```text
-Browser (http://localhost or http://localhost:8080)
+Browser (http://localhost or http://localhost:8088)
   │
   ▼
 [aga-nginx] (Nginx 1.27 Reverse Proxy & Optimization Layer)
@@ -75,7 +75,7 @@ docker compose ps
 
 ### 3. Open the Application
 
-- **Via Optimized Nginx Proxy (Recommended):** [http://localhost](http://localhost) or [http://localhost:8080](http://localhost:8080)
+- **Via Optimized Nginx Proxy (Recommended):** [http://localhost](http://localhost) or [http://localhost:8088](http://localhost:8088)
 - **Direct Next.js Frontend:** [http://localhost:3000](http://localhost:3000)
 - **FastAPI Backend Health & OpenAPI Docs:** [http://localhost:8000/health](http://localhost:8000/health) and [http://localhost:8000/docs](http://localhost:8000/docs)
 
@@ -83,7 +83,7 @@ docker compose ps
 
 ## 90-Second Demo Walkthrough
 
-1. Open [http://localhost:8080](http://localhost:8080) (or [http://localhost](http://localhost)).
+1. Open [http://localhost:8088](http://localhost:8088) (or [http://localhost](http://localhost)).
 2. Click **Try Built-in Demo Dataset**.
    - Loads `sample-data/openapi.json`, `sample-data/routes.csv`, and `sample-data/access-logs.csv`.
 3. Inspect the **Summary Metric Cards** and **Prioritized Findings Queue**:
@@ -139,6 +139,6 @@ PYTHONPATH=backend pytest backend/tests -v
 ## Troubleshooting
 
 - **AI Status shows `AI Fallback Mode`:** Ensure `GEMINI_API_KEY` in `.env` is set to a valid key from Google AI Studio (not empty or `replace_me`) and `GEMINI_ENABLED=true`.
-- **Port 80 conflict on host:** `docker-compose.yml` exposes Nginx on both `NGINX_PORT` (default `80`) and `NGINX_ALT_PORT` (default `8080`). Update `NGINX_PORT` in `.env` if port `80` is already bound on your machine.
+- **Port 80 conflict on host:** `docker-compose.yml` exposes Nginx on both `NGINX_PORT` (default `80`) and `NGINX_ALT_PORT` (default `8088`). Update `NGINX_PORT` in `.env` if port `80` is already bound on your machine.
 - **Quota / HTTP 429 Errors:** The Gemini free tier has rate limits per minute/day. Repeated requests for the same finding or question are served from Redis cache (`aga-redis`), and any rate-limited call gracefully falls back to deterministic templates without breaking the dashboard.
 

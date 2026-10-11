@@ -97,7 +97,7 @@ class Settings:
 
         raw_origins = get_val(
             "CORS_ORIGINS",
-            "http://localhost,http://localhost:80,http://localhost:3000,http://localhost:8080",
+            "http://localhost,http://localhost:80,http://localhost:3000,http://localhost:8088,http://localhost:8080",
         )
         self.cors_origins: List[str] = [o.strip() for o in raw_origins.split(",") if o.strip()]
 

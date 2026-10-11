@@ -149,7 +149,7 @@ FORBIDDEN_PHRASES = [
     "100% unused",
     "certainly unused",
     "can be deleted immediately",
-    "delete this endpoint"s
+    "delete this endpoint",
 ]
 
 
