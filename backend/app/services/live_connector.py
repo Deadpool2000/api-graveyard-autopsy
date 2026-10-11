@@ -75,11 +75,44 @@ SPECLESS_DISCOVERY_CANDIDATES: List[Tuple[str, str]] = [
     ("GET", "/items"),
     ("GET", "/orders"),
     ("GET", "/accounts"),
+    ("GET", "/all"),
+    ("GET", "/random"),
+    ("GET", "/categories"),
+    ("GET", "/groups"),
+    ("GET", "/search"),
+    ("GET", "/list"),
+    ("GET", "/info"),
+    ("GET", "/ping"),
+    ("GET", "/breeds"),
+    ("GET", "/facts"),
+    ("GET", "/quotes"),
+    ("GET", "/jokes"),
+    ("GET", "/characters"),
+    ("GET", "/episodes"),
+    ("GET", "/locations"),
+    ("GET", "/countries"),
+    ("GET", "/rates"),
+    ("GET", "/coins"),
+    ("GET", "/comments"),
+    ("GET", "/albums"),
+    ("GET", "/photos"),
+    ("GET", "/tags"),
     ("GET", "/api"),
     ("GET", "/api/v1"),
     ("GET", "/api/v2"),
     ("GET", "/v1"),
     ("GET", "/v2"),
+    ("GET", "/api/all"),
+    ("GET", "/api/random"),
+    ("GET", "/api/categories"),
+    ("GET", "/api/groups"),
+    ("GET", "/api/search"),
+    ("GET", "/api/users"),
+    ("GET", "/api/products"),
+    ("GET", "/api/health"),
+    ("GET", "/api/status"),
+    ("GET", "/api/v1/users"),
+    ("GET", "/api/v1/health"),
 ]
 
 PREFIX_SUBRESOURCE_CANDIDATES: List[str] = [
@@ -96,17 +129,62 @@ PREFIX_SUBRESOURCE_CANDIDATES: List[str] = [
     "status",
     "version",
     "config",
+    "all",
+    "random",
+    "categories",
+    "groups",
+    "search",
+    "list",
+    "info",
+    "ping",
+    "docs",
+    "breeds",
+    "facts",
+    "quotes",
+    "jokes",
+    "memes",
+    "characters",
+    "episodes",
+    "locations",
+    "books",
+    "movies",
+    "countries",
+    "cities",
+    "weather",
+    "rates",
+    "coins",
+    "markets",
+    "tickers",
+    "comments",
+    "albums",
+    "photos",
+    "tags",
+    "articles",
+    "events",
+    "repos",
+    "me",
+    "profile",
+    "settings",
+    "metrics",
 ]
 
 COMMON_OPENAPI_PATHS: List[str] = [
     "/openapi.json",
     "/swagger.json",
     "/api/openapi.json",
+    "/api/swagger.json",
     "/api/v1/openapi.json",
     "/api/v2/openapi.json",
+    "/api/v3/openapi.json",
     "/v1/openapi.json",
     "/v2/openapi.json",
     "/v3/api-docs",
+    "/v2/api-docs",
+    "/api-docs",
+    "/api-json",
+    "/docs/json",
+    "/swagger/v1/swagger.json",
+    "/swagger/doc.json",
     "/docs/openapi.json",
     "/openapi.yaml",
     "/swagger.yaml",
@@ -196,7 +274,8 @@ _DYNAMIC_TS_OR_UUID_RE = re.compile(
     r"(?:\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?\b"
     r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b)"
 )
-_HTML_HREF_RE = re.compile(r"""href=["'](/[^"'#?\s>]+)["']""", re.IGNORECASE)
+_HTML_HREF_RE = re.compile(r"""href=["']([^"'#?\s>]+)["']""", re.IGNORECASE)
+_HTML_CODE_PATH_RE = re.compile(r"""<code>\s*(?:GET|POST|PUT|DELETE|PATCH)?\s*(/[a-zA-Z0-9_\-\./{}]+)\s*</code>""", re.IGNORECASE)
 
 _shared_httpx_client: Optional[Any] = None
 
@@ -210,7 +289,7 @@ def _get_shared_httpx_client() -> Optional[Any]:
             _shared_httpx_client = httpx.Client(
                 follow_redirects=False,
                 verify=True,
-                limits=httpx.Limits(max_keepalive_connections=16, max_connections=24),
+                limits=httpx.Limits(max_keepalive_connections=24, max_connections=32),
             )
         except Exception:
             return None
@@ -222,7 +301,7 @@ def build_auth_headers_and_params(
 ) -> Tuple[Dict[str, str], Dict[str, str], str]:
     headers: Dict[str, str] = {
         "Accept": "application/json, application/yaml, text/plain, */*",
-        "User-Agent": "API-Graveyard-Autopsy-Scanner/1.2",
+        "User-Agent": "Mozilla/5.0 (compatible; API-Graveyard-Autopsy/1.2)",
     }
     query_params: Dict[str, str] = {}
     atype = (auth.auth_type or "none").strip().lower()
@@ -514,7 +593,7 @@ def _matches_canary(
     if status_code != c_status:
         return False
     norm_len, top_keys = _compute_body_fingerprint(body, concrete_path)
-    if c_keys and top_keys and c_keys != top_keys:
+    if c_keys != top_keys:
         return False
     return abs(norm_len - c_norm_len) <= 24
 
@@ -554,6 +633,114 @@ def _is_valid_api_candidate_path(path_str: str) -> bool:
     return len(path_str) > 1
 
 
+def _slugify_taxonomy_value(raw_val: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", raw_val.strip().lower()).strip("-")
+    return cleaned[:48]
+
+
+def _extract_parameterized_subroutes_from_json_body(
+    body: bytes,
+    current_path: str = "/",
+) -> List[Tuple[str, str]]:
+    """
+    Infer parameterized sub-routes (template_path, concrete_probe_path) from structured JSON responses:
+    - When an endpoint like '/api/random', '/api/all', or '/products' returns objects with
+      'category' or 'group' fields, synthesizes '/.../category/{category}' and '/.../group/{group}'.
+    - When a taxonomy list endpoint like '/api/categories', '/api/groups', or '/products/categories'
+      returns an array of category/group names, synthesizes sibling filter routes.
+    - When an endpoint under a prefix returns objects with a 'name' field, synthesizes
+      '{prefix}/similar/{name}' with a concrete word sample.
+    """
+    if not body:
+        return []
+    clean_curr = (current_path or "/").rstrip("/")
+    if not clean_curr or clean_curr == "/" or "{param}" in clean_curr:
+        return []
+    lower_curr = clean_curr.lower()
+    if any(seg in lower_curr for seg in ("/category/", "/group/", "/similar/")):
+        return []
+
+    try:
+        text = body.decode("utf-8-sig", errors="replace").strip()
+        data = json.loads(text)
+    except Exception:
+        return []
+
+    results: List[Tuple[str, str]] = []
+    parts = [s for s in clean_curr.split("/") if s]
+    parent_prefix = "/" + "/".join(parts[:-1]) if len(parts) > 1 else ""
+    last_seg = parts[-1].lower() if parts else ""
+
+    # 1. Taxonomy array endpoint (e.g. GET /api/categories or GET /products/categories -> ["electronics", ...])
+    if isinstance(data, list) and data and all(isinstance(x, str) for x in data[:5]):
+        sample_slug = ""
+        for item_str in data[:10]:
+            slug = _slugify_taxonomy_value(item_str)
+            if slug and "-" not in slug:
+                sample_slug = slug
+                break
+        if not sample_slug:
+            sample_slug = _slugify_taxonomy_value(data[0])
+
+        if sample_slug:
+            if last_seg == "categories":
+                base_p = parent_prefix or ""
+                if base_p:
+                    results.append((f"{base_p}/category/{{category}}", f"{base_p}/category/{sample_slug}"))
+                    results.append((f"{base_p}/all/category/{{category}}", f"{base_p}/all/category/{sample_slug}"))
+                    results.append((f"{base_p}/random/category/{{category}}", f"{base_p}/random/category/{sample_slug}"))
+            elif last_seg == "groups":
+                base_p = parent_prefix or ""
+                if base_p:
+                    results.append((f"{base_p}/group/{{group}}", f"{base_p}/group/{sample_slug}"))
+                    results.append((f"{base_p}/all/group/{{group}}", f"{base_p}/all/group/{sample_slug}"))
+                    results.append((f"{base_p}/random/group/{{group}}", f"{base_p}/random/group/{sample_slug}"))
+
+    # 2. Object or list of objects containing 'category', 'group', or 'name'
+    sample_objs: List[Dict[str, Any]] = []
+    if isinstance(data, dict):
+        sample_objs.append(data)
+        for wk in (last_seg, *COLLECTION_WRAPPER_KEYS):
+            cand_list = data.get(wk)
+            if isinstance(cand_list, list):
+                sample_objs.extend([r for r in cand_list[:5] if isinstance(r, dict)])
+                break
+    elif isinstance(data, list):
+        sample_objs.extend([r for r in data[:5] if isinstance(r, dict)])
+
+    found_cat = False
+    found_grp = False
+    found_name = False
+    for obj in sample_objs:
+        if not found_cat and isinstance(obj.get("category"), str) and obj["category"].strip():
+            c_slug = _slugify_taxonomy_value(obj["category"])
+            if c_slug:
+                results.append((f"{clean_curr}/category/{{category}}", f"{clean_curr}/category/{c_slug}"))
+                if parent_prefix and last_seg in ("all", "random"):
+                    sib = "random" if last_seg == "all" else "all"
+                    results.append((f"{parent_prefix}/{sib}/category/{{category}}", f"{parent_prefix}/{sib}/category/{c_slug}"))
+                found_cat = True
+
+        if not found_grp and isinstance(obj.get("group"), str) and obj["group"].strip():
+            g_slug = _slugify_taxonomy_value(obj["group"])
+            if g_slug:
+                results.append((f"{clean_curr}/group/{{group}}", f"{clean_curr}/group/{g_slug}"))
+                if parent_prefix and last_seg in ("all", "random"):
+                    sib = "random" if last_seg == "all" else "all"
+                    results.append((f"{parent_prefix}/{sib}/group/{{group}}", f"{parent_prefix}/{sib}/group/{g_slug}"))
+                found_grp = True
+
+        if not found_name and isinstance(obj.get("name"), str) and obj["name"].strip():
+            raw_name = obj["name"].strip()
+            first_word = re.sub(r"[^a-zA-Z0-9]+", "", raw_name.split(",")[0].split()[0]).lower()
+            if first_word and len(first_word) >= 2:
+                target_prefix = parent_prefix if parent_prefix else ""
+                results.append((f"{target_prefix}/similar/{{name}}", f"{target_prefix}/similar/{first_word}"))
+                found_name = True
+
+    return results
+
+
 def _extract_candidate_paths_from_json_body(
     body: bytes,
     origin_url: str,
@@ -565,7 +752,7 @@ def _extract_candidate_paths_from_json_body(
     2. Hypermedia/HATEOAS link fields ('href', 'url', 'uri', 'path', 'endpoint', '_links').
     3. Collection-to-detail route inference: if a collection endpoint (e.g. '/users') returns
        objects with an ID field ('id', 'user_id', 'order_id', etc.), synthesizes '/users/{sample_id}'.
-    4. HTML href links if the endpoint returned an HTML index page.
+    4. HTML href links and inline <code>/api/...</code> paths if the endpoint returned an HTML page.
     """
     discovered_set: Set[str] = set()
     if not body:
@@ -579,19 +766,27 @@ def _extract_candidate_paths_from_json_body(
     if not text:
         return []
 
-    # Check HTML links if response looks like HTML
-    if text.startswith("<") or "<a " in text.lower():
+    base_dir = current_path.rstrip("/") or ""
+
+    # Check HTML links and <code> blocks if response looks like HTML
+    if text.startswith("<") or "<a " in text.lower() or "<code>" in text.lower():
         for match in _HTML_HREF_RE.findall(text):
             clean_m = match.split("?")[0].split("#")[0].strip()
+            if clean_m.startswith(origin_url):
+                clean_m = clean_m[len(origin_url):] or "/"
+            elif not clean_m.startswith(("http://", "https://", "mailto:", "javascript:", "#")) and not clean_m.startswith("/"):
+                clean_m = f"{base_dir}/{clean_m.lstrip('./')}".replace("//", "/")
             if _is_valid_api_candidate_path(clean_m):
                 discovered_set.add(clean_m)
+        for code_match in _HTML_CODE_PATH_RE.findall(text):
+            clean_c = code_match.split("?")[0].split("#")[0].strip()
+            if _is_valid_api_candidate_path(clean_c):
+                discovered_set.add(clean_c)
 
     try:
         data = json.loads(text)
     except Exception:
         return sorted(discovered_set)
-
-    base_dir = current_path.rstrip("/") or ""
 
     def _add_candidate(raw_val: str, allow_relative_to_current: bool = False) -> None:
         if len(discovered_set) >= 60:
@@ -809,7 +1004,7 @@ def collect_live_api_sources(
                 except Exception as exc:
                     return b_root, oa_p, None, str(exc)
 
-            with ThreadPoolExecutor(max_workers=4) as oa_pool:
+            with ThreadPoolExecutor(max_workers=8) as oa_pool:
                 for b_root, oa_p, valid_body, err_str in oa_pool.map(_try_fetch_oa, oa_candidates):
                     if valid_body is not None and final_openapi_bytes is None:
                         final_openapi_bytes = valid_body
@@ -895,6 +1090,7 @@ def collect_live_api_sources(
         openapi_canonical_targets: Set[Tuple[str, str]] = set()
         # Each queue item is (method, template_path, concrete_path)
         current_hop_queue: List[Tuple[str, str, str]] = []
+        expanded_prefixes: Set[str] = set()
 
         def _enqueue_target(
             method: str,
@@ -902,14 +1098,18 @@ def collect_live_api_sources(
             is_concrete: bool = False,
             is_explicit: bool = False,
             is_openapi: bool = False,
+            concrete_override: Optional[str] = None,
         ) -> None:
             m_up = method.upper().strip()
             tmpl_p, canon_p = _canonicalize_discovered_path(raw_path, is_concrete=is_concrete)
-            concrete_p = (
-                raw_path.split("?")[0].split("#")[0].strip()
-                if is_concrete
-                else _materialize_probe_path(tmpl_p)
-            )
+            if concrete_override:
+                concrete_p = concrete_override.split("?")[0].split("#")[0].strip()
+            else:
+                concrete_p = (
+                    raw_path.split("?")[0].split("#")[0].strip()
+                    if is_concrete
+                    else _materialize_probe_path(tmpl_p)
+                )
             if not concrete_p.startswith("/"):
                 concrete_p = f"/{concrete_p}"
 
@@ -942,9 +1142,13 @@ def collect_live_api_sources(
                 is_openapi=True,
             )
 
-        # 3. Seed user's extra probe paths
+        # 3. Seed user's extra probe paths (both at root and under user-supplied prefix if applicable)
         for m, p in parse_extra_probe_paths(extra_probe_paths):
             _enqueue_target(m, p, is_concrete=False, is_explicit=True)
+            if user_supplied_path and user_supplied_path != "/":
+                clean_prefix = user_supplied_path.rstrip("/")
+                if not p.startswith(f"{clean_prefix}/") and p != clean_prefix:
+                    _enqueue_target(m, f"{clean_prefix}{p}", is_concrete=False, is_explicit=True)
 
         # 4. Seed Spec-less discovery candidates (both at root and under user-supplied prefix if applicable)
         if is_specless_mode:
@@ -952,6 +1156,7 @@ def collect_live_api_sources(
                 _enqueue_target(m, p, is_concrete=False, is_explicit=False)
             if user_supplied_path and user_supplied_path != "/":
                 clean_prefix = user_supplied_path.rstrip("/")
+                expanded_prefixes.add(clean_prefix)
                 for sub_res in PREFIX_SUBRESOURCE_CANDIDATES:
                     _enqueue_target("GET", f"{clean_prefix}/{sub_res}", is_concrete=False, is_explicit=False)
 
@@ -984,7 +1189,6 @@ def collect_live_api_sources(
         already_implemented_canonical: Set[Tuple[str, str]] = {
             (r["method"].upper(), normalize_template_path(r["path"])[0]) for r in discovered_routes
         }
-        expanded_prefixes: Set[str] = set()
         now_ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
         def _probe_single_target(
@@ -1027,7 +1231,7 @@ def collect_live_api_sources(
                 return None
 
         max_crawl_depth = 3
-        max_total_probes = 90
+        max_total_probes = 160
         crawl_hops_executed = 0
 
         for hop in range(max_crawl_depth):
@@ -1039,10 +1243,10 @@ def collect_live_api_sources(
             current_hop_queue = []
             crawl_hops_executed = hop + 1
 
-            with ThreadPoolExecutor(max_workers=4) as probe_pool:
+            with ThreadPoolExecutor(max_workers=8) as probe_pool:
                 probe_results = list(probe_pool.map(_probe_single_target, batch_to_probe))
 
-            next_hop_candidates: List[Tuple[str, bool]] = []
+            next_hop_candidates: List[Tuple[str, bool, Optional[str]]] = []
 
             for res_item in probe_results:
                 if res_item is None:
@@ -1059,12 +1263,16 @@ def collect_live_api_sources(
                 if is_catchall:
                     continue
 
-                # Deeply extract links, hypermedia paths, and collection item detail routes from 200 OK bodies
+                # Deeply extract links, hypermedia paths, collection item detail routes, and taxonomy subroutes from 200 OK bodies
                 if p_status == 200 and p_body and hop < max_crawl_depth - 1:
                     for linked_path in _extract_candidate_paths_from_json_body(
                         p_body, origin_url, current_path=concrete_path
                     ):
-                        next_hop_candidates.append((linked_path, True))
+                        next_hop_candidates.append((linked_path, True, None))
+                    for tmpl_sub, conc_sub in _extract_parameterized_subroutes_from_json_body(
+                        p_body, current_path=concrete_path
+                    ):
+                        next_hop_candidates.append((tmpl_sub, False, conc_sub))
 
                 if p_status in IMPLEMENTED_STATUS_CODES:
                     if canon_key not in already_implemented_canonical:
@@ -1110,11 +1318,19 @@ def collect_live_api_sources(
                         if prefix_candidate and prefix_candidate not in expanded_prefixes:
                             expanded_prefixes.add(prefix_candidate)
                             for sub_res in PREFIX_SUBRESOURCE_CANDIDATES:
-                                next_hop_candidates.append((f"{prefix_candidate}/{sub_res}", False))
+                                next_hop_candidates.append((f"{prefix_candidate}/{sub_res}", False, None))
 
             # Sort and enqueue next hop candidates deterministically
-            for cand_path, is_conc in sorted(set(next_hop_candidates)):
-                _enqueue_target("GET", cand_path, is_concrete=is_conc, is_explicit=False)
+            for cand_path, is_conc, conc_ovr in sorted(
+                set(next_hop_candidates), key=lambda x: (x[0], x[1], x[2] or "")
+            ):
+                _enqueue_target(
+                    "GET",
+                    cand_path,
+                    is_concrete=is_conc,
+                    is_explicit=False,
+                    concrete_override=conc_ovr,
+                )
 
         if is_specless_mode and not discovered_routes and initial_user_url_response is not None:
             st, _ = initial_user_url_response

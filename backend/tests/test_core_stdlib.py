@@ -314,7 +314,67 @@ class TestCoreParsersAndNormalizer(unittest.TestCase):
         # Catch-all non-existent shadow routes must be filtered out by normalized canary fingerprint
         self.assertNotIn(("GET", "/api/internal/debug/env-config"), route_pairs)
 
+    def test_specless_emojihub_style_api_discovery(self) -> None:
+        """
+        Verify crawling of APIs like https://emojihub.yurace.pro/api/ where:
+        - No public OpenAPI spec is hosted (all /openapi.json return 404)
+        - Root '/' and '/api' return 404
+        - Active endpoints live under '/api/all', '/api/random', '/api/categories', '/api/groups', '/api/search' (400)
+        - Hop-2 parameterized taxonomy/filter sub-routes live under '/api/all/category/{category}',
+          '/api/random/group/{group}', and '/api/similar/{name}'
+        """
+        def fake_emojihub_requester(
+            method: str, url: str, headers: dict[str, str], timeout: float
+        ) -> tuple[int, bytes]:
+            if method != "GET":
+                return 404, b"404 page not found"
+            path = url.split("emojihub.yurace.pro")[-1].split("?")[0]
+            if path == "/api/random":
+                return 200, (
+                    b'{"name":"family, woman, woman, girl","category":"smileys and people",'
+                    b'"group":"family","htmlCode":["&#128105;"],"unicode":["U+1F469"]}'
+                )
+            if path == "/api/all":
+                return 200, (
+                    b'[{"name":"grinning face","category":"smileys and people",'
+                    b'"group":"face positive","htmlCode":["&#128512;"],"unicode":["U+1F600"]}]'
+                )
+            if path == "/api/categories":
+                return 200, b'["smileys and people","animals and nature","activities"]'
+            if path == "/api/groups":
+                return 200, b'["face positive","face neutral","family"]'
+            if path == "/api/search":
+                return 400, b'{"error":"missing query parameter q"}'
+            if path.startswith("/api/all/category/") or path.startswith("/api/random/category/"):
+                return 200, b'[{"name":"grinning face","category":"smileys and people"}]'
+            if path.startswith("/api/all/group/") or path.startswith("/api/random/group/"):
+                return 200, b'[{"name":"family","group":"family"}]'
+            if path.startswith("/api/similar/"):
+                return 200, b'[{"name":"family"}]'
+            return 404, b"404 page not found"
+
+        res = collect_live_api_sources(
+            target_base_url="https://emojihub.yurace.pro/api/",
+            probe_endpoints=True,
+            include_shadow_wordlist=True,
+            requester=fake_emojihub_requester,
+        )
+
+        parsed_routes = parse_routes_content(res.routes_bytes, filename="routes.json")
+        route_pairs = {(r.method, r.normalized_path) for r in parsed_routes.routes}
+        self.assertIn(("GET", "/api/all"), route_pairs)
+        self.assertIn(("GET", "/api/random"), route_pairs)
+        self.assertIn(("GET", "/api/categories"), route_pairs)
+        self.assertIn(("GET", "/api/groups"), route_pairs)
+        self.assertIn(("GET", "/api/search"), route_pairs)
+        self.assertIn(("GET", "/api/all/category/{param}"), route_pairs)
+        self.assertIn(("GET", "/api/random/category/{param}"), route_pairs)
+        self.assertIn(("GET", "/api/all/group/{param}"), route_pairs)
+        self.assertIn(("GET", "/api/random/group/{param}"), route_pairs)
+        self.assertIn(("GET", "/api/similar/{param}"), route_pairs)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
