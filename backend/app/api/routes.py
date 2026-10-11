@@ -17,6 +17,7 @@ def health_check() -> Dict[str, object]:
         "status": "ok",
         "service": "api-graveyard-autopsy-backend",
         "redis_connected": store.is_redis_connected(),
+        "sqlite_connected": store.is_sqlite_connected(),
         "ai_configured": settings.is_gemini_configured,
         "ai_enabled": settings.gemini_enabled,
         "ai_model": settings.gemini_model if settings.is_gemini_configured else None,
@@ -31,6 +32,7 @@ def api_status() -> Dict[str, object]:
         "status": "ok",
         "max_upload_size_mb": settings.max_upload_size_mb,
         "redis_connected": store.is_redis_connected(),
+        "sqlite_connected": store.is_sqlite_connected(),
         "ai": {
             "enabled": settings.gemini_enabled,
             "configured": settings.is_gemini_configured,

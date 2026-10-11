@@ -42,6 +42,7 @@ services:
       - .env
     environment:
       - ENV_FILE_PATH=/app/.env
+      - SQLITE_DB_PATH=/app/data/autopsy_history.db
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
@@ -55,11 +56,14 @@ services:
     volumes:
       - ./sample-data:/app/sample-data:ro
       - ./.env:/app/.env:ro
+      - aga-sqlite-data:/app/data
     ports:
       - "${BACKEND_PORT:-8000}:8000"
     depends_on:
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       aga-network:
         aliases:
@@ -83,6 +87,7 @@ services:
       - .env
     environment:
       - ENV_FILE_PATH=/app/.env
+      - SQLITE_DB_PATH=/app/data/autopsy_history.db
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.5-flash}
       - GEMINI_ENABLED=${GEMINI_ENABLED:-true}
@@ -96,11 +101,34 @@ services:
     volumes:
       - ./sample-data:/app/sample-data:ro
       - ./.env:/app/.env:ro
+      - aga-sqlite-data:/app/data
     depends_on:
       redis:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - aga-network
+    restart: unless-stopped
+
+  target-api:
+    build:
+      context: ./target-api
+      dockerfile: Dockerfile
+    container_name: aga-target-api
+    ports:
+      - "${TARGET_API_PORT:-8090}:8090"
+    networks:
+      aga-network:
+        aliases:
+          - target-api
+          - zombie-api
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
     restart: unless-stopped
 
   redis:
@@ -120,3 +148,5 @@ networks:
   aga-network:
     driver: bridge
 
+volumes:
+  aga-sqlite-data:

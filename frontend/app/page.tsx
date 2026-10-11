@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   Loader2,
@@ -10,11 +10,15 @@ import {
 import {
   askAnalysisQuestion,
   createCustomAnalysis,
+  createLiveAnalysis,
+  deleteAnalysisRecord,
   fetchAnalysis,
+  fetchAnalysisHistory,
   fetchFindings,
   generateExecutiveSummary,
   generateInvestigationPlan,
   investigateFinding,
+  simulateLiveTraffic,
   startDemoAnalysis,
 } from "@/lib/api";
 import {
@@ -30,7 +34,10 @@ import {
   getSeverityStyle,
 } from "@/components/Badges";
 import { ActiveTab, Header } from "@/components/Header";
-import { UploadAndLanding } from "@/components/UploadAndLanding";
+import {
+  LiveScanFormParams,
+  UploadAndLanding,
+} from "@/components/UploadAndLanding";
 import { FindingInspector } from "@/components/FindingInspector";
 import {
   AskAnalysisTab,
@@ -58,6 +65,9 @@ export default function AutopsyWorkbench() {
   const [mobileInspectorOpen, setMobileInspectorOpen] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<ActiveTab>("findings");
   const [uploadModalOpen, setUploadModalOpen] = useState<boolean>(false);
+
+  // SQLite History state
+  const [historyAnalyses, setHistoryAnalyses] = useState<AnalysisResponse[]>([]);
 
   // Upload form state
   const [analysisName, setAnalysisName] = useState<string>("");
@@ -93,6 +103,19 @@ export default function AutopsyWorkbench() {
   const [isAskingChat, setIsAskingChat] = useState<boolean>(false);
   const [chatHistory, setChatHistory] = useState<ChatResponseRecord[]>([]);
 
+  const refreshHistory = useCallback(async () => {
+    try {
+      const res = await fetchAnalysisHistory(30);
+      setHistoryAnalyses(res.analyses || []);
+    } catch {
+      // Ignore background history refresh errors
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshHistory();
+  }, [refreshHistory]);
+
   // Poll job status if queued or processing
   useEffect(() => {
     if (!analysis) return;
@@ -111,8 +134,10 @@ export default function AutopsyWorkbench() {
             setSelectedFindingId(fRes.findings[0].id);
           }
           setUploadModalOpen(false);
+          refreshHistory();
         } else if (updated.status === "failed") {
           setErrorBanner(updated.error_message || "Analysis job failed.");
+          refreshHistory();
         }
       } catch (err) {
         setErrorBanner(
@@ -122,7 +147,7 @@ export default function AutopsyWorkbench() {
     }, 650);
 
     return () => clearInterval(timer);
-  }, [analysis, selectedFindingId]);
+  }, [analysis, selectedFindingId, refreshHistory]);
 
   const handleGoHome = () => {
     setAnalysis(null);
@@ -132,6 +157,52 @@ export default function AutopsyWorkbench() {
     setUploadModalOpen(false);
     setErrorBanner(null);
     setActiveTab("findings");
+    refreshHistory();
+  };
+
+  const handleSelectHistoryAnalysis = async (record: AnalysisResponse) => {
+    setErrorBanner(null);
+    setIsStartingAnalysis(true);
+    setSelectedCategory("all");
+    setSelectedMethod("all");
+    setSearchQuery("");
+    setActiveTab("findings");
+    setChatHistory([]);
+
+    try {
+      const fullRecord = await fetchAnalysis(record.id);
+      setAnalysis(fullRecord);
+      setExecutiveSummary(fullRecord.executive_summary || null);
+      setInvestigationPlan(fullRecord.investigation_plan || null);
+      if (fullRecord.status === "completed") {
+        const fRes = await fetchFindings(fullRecord.id);
+        setFindings(fRes.findings);
+        setSelectedFindingId(fRes.findings[0]?.id || null);
+      }
+      setUploadModalOpen(false);
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : "Failed to load saved report."
+      );
+    } finally {
+      setIsStartingAnalysis(false);
+    }
+  };
+
+  const handleDeleteHistoryAnalysis = async (analysisId: string) => {
+    try {
+      await deleteAnalysisRecord(analysisId);
+      setHistoryAnalyses((prev) =>
+        prev.filter((item) => item.id !== analysisId)
+      );
+      if (analysis?.id === analysisId) {
+        handleGoHome();
+      }
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : "Failed to delete saved report."
+      );
+    }
   };
 
   const handleLoadDemo = async () => {
@@ -153,6 +224,7 @@ export default function AutopsyWorkbench() {
         setFindings(fRes.findings);
         setSelectedFindingId(fRes.findings[0]?.id || null);
         setUploadModalOpen(false);
+        refreshHistory();
       }
     } catch (err) {
       setErrorBanner(
@@ -199,6 +271,7 @@ export default function AutopsyWorkbench() {
         setFindings(fRes.findings);
         setSelectedFindingId(fRes.findings[0]?.id || null);
         setUploadModalOpen(false);
+        refreshHistory();
       } else if (created.status === "failed") {
         setErrorBanner(created.error_message || "Analysis validation failed.");
       }
@@ -208,6 +281,95 @@ export default function AutopsyWorkbench() {
       );
     } finally {
       setIsStartingAnalysis(false);
+    }
+  };
+
+  const handleLiveScanSubmit = async (params: LiveScanFormParams) => {
+    setErrorBanner(null);
+
+    if (!params.targetBaseUrl.trim()) {
+      setErrorBanner("Target API Base URL is required.");
+      return;
+    }
+
+    setIsStartingAnalysis(true);
+    setExecutiveSummary(null);
+    setInvestigationPlan(null);
+    setChatHistory([]);
+    setSelectedCategory("all");
+    setSelectedMethod("all");
+    setSearchQuery("");
+    setActiveTab("findings");
+
+    try {
+      const formData = new FormData();
+      formData.append("target_base_url", params.targetBaseUrl.trim());
+      formData.append(
+        "openapi_path",
+        params.openapiPath.trim() || "/openapi.json"
+      );
+      if (params.analysisName.trim()) {
+        formData.append("analysis_name", params.analysisName.trim());
+      }
+      formData.append("auth_type", params.authType);
+      formData.append("auth_token", params.authToken);
+      formData.append("auth_header_name", params.authHeaderName);
+      formData.append("auth_query_param", params.authQueryParam);
+      formData.append("basic_username", params.basicUsername);
+      formData.append("basic_password", params.basicPassword);
+      formData.append("custom_headers_json", params.customHeadersJson);
+      formData.append("probe_endpoints", String(params.probeEndpoints));
+      formData.append(
+        "include_shadow_wordlist",
+        String(params.includeShadowWordlist)
+      );
+      if (params.extraProbePaths.trim()) {
+        formData.append("extra_probe_paths", params.extraProbePaths.trim());
+      }
+      if (params.openapiFile) {
+        formData.append("openapi_file", params.openapiFile);
+      }
+      if (params.logsFile) {
+        formData.append("logs_file", params.logsFile);
+      }
+
+      const created = await createLiveAnalysis(formData);
+      setAnalysis(created);
+      if (created.status === "completed") {
+        const fRes = await fetchFindings(created.id);
+        setFindings(fRes.findings);
+        setSelectedFindingId(fRes.findings[0]?.id || null);
+        setUploadModalOpen(false);
+        refreshHistory();
+      } else if (created.status === "failed") {
+        setErrorBanner(created.error_message || "Live API scan failed.");
+      }
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error ? err.message : "Failed to scan live API."
+      );
+    } finally {
+      setIsStartingAnalysis(false);
+    }
+  };
+
+  const handleSimulateTraffic = async (
+    targetBaseUrl: string
+  ): Promise<string | null> => {
+    setErrorBanner(null);
+    try {
+      const res = await simulateLiveTraffic(targetBaseUrl);
+      return (
+        res.message ||
+        `Simulated ${res.added_requests} live requests (total logs: ${res.total_logs}).`
+      );
+    } catch (err) {
+      setErrorBanner(
+        err instanceof Error
+          ? err.message
+          : "Failed to simulate live traffic burst."
+      );
+      return null;
     }
   };
 
@@ -347,8 +509,12 @@ export default function AutopsyWorkbench() {
         setActiveTab={setActiveTab}
         isStartingAnalysis={isStartingAnalysis}
         onLoadDemo={handleLoadDemo}
-        onOpenUploadModal={() => setUploadModalOpen(true)}
+        onOpenUploadModal={() => {
+          refreshHistory();
+          setUploadModalOpen(true);
+        }}
         onGoHome={handleGoHome}
+        historyCount={historyAnalyses.length}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
@@ -369,7 +535,7 @@ export default function AutopsyWorkbench() {
           </div>
         )}
 
-        {/* Upload Modal when an analysis is already open */}
+        {/* Upload / Live Scan / History Modal when an analysis is already open */}
         {uploadModalOpen && analysis && (
           <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 sm:p-6 overflow-y-auto">
             <div className="w-full max-w-4xl my-auto">
@@ -387,6 +553,11 @@ export default function AutopsyWorkbench() {
                 isStartingAnalysis={isStartingAnalysis}
                 onLoadDemo={handleLoadDemo}
                 onSubmitCustom={handleCustomSubmit}
+                onSubmitLiveScan={handleLiveScanSubmit}
+                onSimulateTraffic={handleSimulateTraffic}
+                historyAnalyses={historyAnalyses}
+                onSelectHistoryAnalysis={handleSelectHistoryAnalysis}
+                onDeleteHistoryAnalysis={handleDeleteHistoryAnalysis}
               />
             </div>
           </div>
@@ -406,6 +577,11 @@ export default function AutopsyWorkbench() {
             isStartingAnalysis={isStartingAnalysis}
             onLoadDemo={handleLoadDemo}
             onSubmitCustom={handleCustomSubmit}
+            onSubmitLiveScan={handleLiveScanSubmit}
+            onSimulateTraffic={handleSimulateTraffic}
+            historyAnalyses={historyAnalyses}
+            onSelectHistoryAnalysis={handleSelectHistoryAnalysis}
+            onDeleteHistoryAnalysis={handleDeleteHistoryAnalysis}
           />
         )}
 

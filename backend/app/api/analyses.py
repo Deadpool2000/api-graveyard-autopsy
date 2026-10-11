@@ -7,6 +7,12 @@ from fastapi.responses import PlainTextResponse, Response
 
 from app.config import get_settings
 from app.schemas.models import AnalysisPublicResponse, AnalysisRecord, Finding
+from app.services.live_connector import (
+    LiveAuthConfig,
+    LiveConnectorError,
+    collect_live_api_sources,
+    trigger_live_traffic_burst,
+)
 from app.services.log_parser import LogParseError, parse_logs_content
 from app.services.openapi_parser import OpenAPIParseError, parse_openapi_content
 from app.services.pipeline import execute_analysis_pipeline
@@ -86,6 +92,26 @@ def _fallback_background_runner(
             logs_bytes=logs_bytes,
             logs_filename=logs_filename,
         )
+
+
+@router.get("")
+def list_saved_analyses(
+    limit: int = Query(default=30, ge=1, le=100),
+) -> Dict[str, object]:
+    """
+    List saved historical analysis reports from the persistent SQLite database (newest first).
+    """
+    records = store.list_analyses(limit=limit)
+    items: List[Dict[str, object]] = []
+    for rec in records:
+        pub = _to_public_response(rec).model_dump()
+        pub["analysis_id"] = rec.id
+        items.append(pub)
+    return {
+        "total_count": len(items),
+        "sqlite_connected": store.is_sqlite_connected(),
+        "analyses": items,
+    }
 
 
 @router.post("/demo", status_code=status.HTTP_201_CREATED)
@@ -239,7 +265,6 @@ async def create_analysis(
 
     enqueued = store.enqueue_job(analysis_id)
     if not enqueued:
-        # Execute synchronously if Redis queue is not available
         execute_analysis_pipeline(
             analysis_id=analysis_id,
             openapi_bytes=openapi_bytes,
@@ -267,6 +292,167 @@ async def create_analysis(
     return pub
 
 
+@router.post("/live", status_code=status.HTTP_202_ACCEPTED)
+async def create_live_analysis(
+    background_tasks: BackgroundTasks,
+    target_base_url: str = Form(...),
+    openapi_path: str = Form(default="/openapi.json"),
+    analysis_name: Optional[str] = Form(default=None),
+    auth_type: str = Form(default="none"),
+    auth_token: str = Form(default=""),
+    auth_header_name: str = Form(default="X-API-Key"),
+    auth_query_param: str = Form(default="api_key"),
+    basic_username: str = Form(default=""),
+    basic_password: str = Form(default=""),
+    custom_headers_json: str = Form(default=""),
+    probe_endpoints: bool = Form(default=True),
+    include_shadow_wordlist: bool = Form(default=True),
+    extra_probe_paths: Optional[str] = Form(default=None),
+    openapi_file: Optional[UploadFile] = File(default=None),
+    logs_file: Optional[UploadFile] = File(default=None),
+) -> Dict[str, object]:
+    """
+    Scan a live running API (either the built-in Zombie API container or an external API)
+    with optional authentication, active non-destructive route probing, and hybrid file overrides.
+    Credentials are used strictly in-memory and never persisted.
+    """
+    settings = get_settings()
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+
+    openapi_override_bytes: Optional[bytes] = None
+    openapi_override_filename = "openapi.json"
+    if openapi_file is not None and openapi_file.filename:
+        openapi_override_filename = openapi_file.filename
+        openapi_override_bytes = await openapi_file.read()
+        if len(openapi_override_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"OpenAPI file exceeds the {settings.max_upload_size_mb} MB upload limit.",
+            )
+
+    logs_override_bytes: Optional[bytes] = None
+    logs_override_filename = "access-logs.csv"
+    if logs_file is not None and logs_file.filename:
+        logs_override_filename = logs_file.filename
+        logs_override_bytes = await logs_file.read()
+        if len(logs_override_bytes) > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail=f"Request logs file exceeds the {settings.max_upload_size_mb} MB upload limit.",
+            )
+        try:
+            parse_logs_content(logs_override_bytes, filename=logs_override_filename)
+        except LogParseError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+    auth_cfg = LiveAuthConfig(
+        auth_type=auth_type,
+        auth_token=auth_token,
+        auth_header_name=auth_header_name,
+        auth_query_param=auth_query_param,
+        basic_username=basic_username,
+        basic_password=basic_password,
+        custom_headers_json=custom_headers_json,
+    )
+
+    try:
+        scan_result = collect_live_api_sources(
+            target_base_url=target_base_url,
+            openapi_path=openapi_path,
+            auth_config=auth_cfg,
+            probe_endpoints=probe_endpoints,
+            include_shadow_wordlist=include_shadow_wordlist,
+            extra_probe_paths=extra_probe_paths,
+            openapi_override_bytes=openapi_override_bytes,
+            openapi_override_filename=openapi_override_filename,
+            logs_override_bytes=logs_override_bytes,
+            logs_override_filename=logs_override_filename,
+        )
+    except (LiveConnectorError, OpenAPIParseError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    analysis_id = str(uuid.uuid4())
+    clean_name = (analysis_name or "").strip()[:120] or f"Live API Scan ({scan_result.resolved_base_url})"
+
+    record = AnalysisRecord(
+        id=analysis_id,
+        name=clean_name,
+        is_demo=False,
+        status="queued",
+        stage="queued",
+        progress_percent=15,
+        created_at=_now_iso(),
+    )
+    store.save_analysis(record)
+    store.save_raw_inputs(
+        analysis_id=analysis_id,
+        openapi_bytes=scan_result.openapi_bytes,
+        openapi_filename=scan_result.openapi_filename,
+        routes_bytes=scan_result.routes_bytes,
+        routes_filename=scan_result.routes_filename,
+        logs_bytes=scan_result.logs_bytes,
+        logs_filename=scan_result.logs_filename,
+    )
+
+    enqueued = store.enqueue_job(analysis_id)
+    if not enqueued:
+        execute_analysis_pipeline(
+            analysis_id=analysis_id,
+            openapi_bytes=scan_result.openapi_bytes,
+            openapi_filename=scan_result.openapi_filename,
+            routes_bytes=scan_result.routes_bytes,
+            routes_filename=scan_result.routes_filename,
+            logs_bytes=scan_result.logs_bytes,
+            logs_filename=scan_result.logs_filename,
+        )
+    else:
+        background_tasks.add_task(
+            _fallback_background_runner,
+            analysis_id,
+            scan_result.openapi_bytes,
+            scan_result.openapi_filename,
+            scan_result.routes_bytes,
+            scan_result.routes_filename,
+            scan_result.logs_bytes,
+            scan_result.logs_filename,
+        )
+
+    latest = store.get_analysis(analysis_id) or record
+    pub = _to_public_response(latest).model_dump()
+    pub["analysis_id"] = analysis_id
+    pub["live_scan_info"] = {
+        "resolved_base_url": scan_result.resolved_base_url,
+        "auth_summary": scan_result.auth_summary,
+        "probed_count": scan_result.probed_count,
+        "discovered_routes_count": scan_result.discovered_routes_count,
+        "logs_captured_count": scan_result.logs_captured_count,
+        "notes": scan_result.notes,
+    }
+    return pub
+
+
+@router.post("/live/simulate-traffic")
+def simulate_live_traffic(
+    target_base_url: str = Form(default="http://target-api:8090"),
+) -> Dict[str, object]:
+    """
+    Trigger a simulated burst of runtime traffic on the Target Zombie API container.
+    """
+    try:
+        return trigger_live_traffic_burst(target_base_url=target_base_url)
+    except LiveConnectorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 @router.get("/{analysis_id}")
 def get_analysis_status(analysis_id: str) -> Dict[str, object]:
     """Return status, stage, summary, and metadata for an analysis."""
@@ -276,6 +462,15 @@ def get_analysis_status(analysis_id: str) -> Dict[str, object]:
     pub = _to_public_response(record).model_dump()
     pub["analysis_id"] = record.id
     return pub
+
+
+@router.delete("/{analysis_id}")
+def delete_saved_analysis(analysis_id: str) -> Dict[str, object]:
+    """Delete a saved analysis report from the SQLite history database and Redis cache."""
+    deleted = store.delete_analysis(analysis_id)
+    if not deleted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Analysis not found.")
+    return {"status": "deleted", "analysis_id": analysis_id}
 
 
 @router.get("/{analysis_id}/findings")
@@ -352,4 +547,3 @@ def export_analysis_report(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported report format. Allowed values: 'markdown' or 'json'.",
         )
-

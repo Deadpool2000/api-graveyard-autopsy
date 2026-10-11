@@ -1,5 +1,6 @@
 import json
 import os
+from pathlib import Path
 from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
@@ -28,6 +29,7 @@ def test_health_endpoint_does_not_expose_key(monkeypatch: pytest.MonkeyPatch) ->
     assert res.status_code == 200
     body = res.json()
     assert body["status"] == "ok"
+    assert "sqlite_connected" in body
     assert "gemini_api_key" not in body
     if settings.gemini_api_key:
         assert settings.gemini_api_key not in json.dumps(body)
@@ -118,7 +120,6 @@ def test_demo_flow_and_all_p0_finding_categories() -> None:
     assert "Documented but not observed" in categories
     assert "Data-quality issue" in categories
 
-    # Verify guardrail: no finding claims an endpoint is "dead" or "safe to delete"
     for f in findings:
         serialized = json.dumps(f).lower()
         assert "safe to delete" not in serialized
@@ -142,10 +143,102 @@ def test_exports_contain_findings_and_caveats() -> None:
     assert len(report_data["global_caveats"]) > 0
 
 
+def test_sqlite_history_list_and_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    db_file = tmp_path / "autopsy_test.db"
+    monkeypatch.setenv("SQLITE_DB_PATH", str(db_file))
+
+    created = client.post("/api/v1/analyses/demo").json()
+    aid = created["id"]
+    assert db_file.is_file()
+
+    hist_res = client.get("/api/v1/analyses")
+    assert hist_res.status_code == 200
+    hist_body = hist_res.json()
+    assert hist_body["sqlite_connected"] is True
+    ids = [item["id"] for item in hist_body["analyses"]]
+    assert aid in ids
+
+    del_res = client.delete(f"/api/v1/analyses/{aid}")
+    assert del_res.status_code == 200
+    assert del_res.json()["status"] == "deleted"
+
+    missing_res = client.get(f"/api/v1/analyses/{aid}")
+    assert missing_res.status_code == 404
+
+
+def test_live_api_scan_endpoint_with_auth_and_zero_credential_leak() -> None:
+    fake_openapi = {
+        "openapi": "3.0.3",
+        "info": {"title": "Live Zombie Target", "version": "2.0.0"},
+        "paths": {
+            "/api/v2/users": {"get": {"summary": "Active v2 users"}},
+            "/api/v2/users/{user_id}/gdpr-erase": {"delete": {"summary": "Ghost endpoint"}},
+        },
+    }
+    fake_logs = {
+        "logs": [
+            {
+                "timestamp": "2026-10-01T10:00:00Z",
+                "method": "GET",
+                "path": "/api/v2/users",
+                "status_code": 200,
+                "latency_ms": 15.0,
+            },
+            {
+                "timestamp": "2026-10-10T10:00:00Z",
+                "method": "GET",
+                "path": "/api/v1/legacy/accounts",
+                "status_code": 200,
+                "latency_ms": 38.0,
+            },
+        ]
+    }
+
+    def mock_http(method: str, url: str, headers: dict[str, str], timeout: float) -> tuple[int, bytes]:
+        assert headers.get("Authorization") == "Bearer secret-live-token-xyz"
+        if url.endswith("/openapi.json"):
+            return 200, json.dumps(fake_openapi).encode("utf-8")
+        if url.endswith("/_autopsy/routes"):
+            return 404, b"Not Found"
+        if url.endswith("/_autopsy/logs"):
+            return 200, json.dumps(fake_logs).encode("utf-8")
+        if "gdpr-erase" in url and method == "DELETE":
+            return 404, b"Not Found"
+        if url.endswith("/api/v2/users") and method == "GET":
+            return 200, b"[]"
+        if url.endswith("/api/v1/legacy/accounts") and method == "GET":
+            return 200, b"[]"
+        return 404, b"Not Found"
+
+    with patch("app.services.live_connector._default_urllib_requester", side_effect=mock_http):
+        res = client.post(
+            "/api/v1/analyses/live",
+            data={
+                "target_base_url": "http://target-api:8090",
+                "openapi_path": "/openapi.json",
+                "analysis_name": "Authenticated Live Scan",
+                "auth_type": "bearer",
+                "auth_token": "secret-live-token-xyz",
+                "probe_endpoints": "true",
+                "include_shadow_wordlist": "true",
+            },
+        )
+        assert res.status_code == 202
+        body = res.json()
+        assert body["status"] == "completed"
+        assert "secret-live-token-xyz" not in json.dumps(body)
+
+        aid = body["id"]
+        findings = client.get(f"/api/v1/analyses/{aid}/findings").json()["findings"]
+        cats = {(f["method"], f["path"], f["category"]) for f in findings}
+        assert ("DELETE", "/api/v2/users/{param}/gdpr-erase", "Documented but not implemented") in cats
+        assert ("GET", "/api/v1/legacy/accounts", "Implemented but undocumented") in cats
+        assert ("GET", "/api/v1/legacy/accounts", "Observed but undocumented") in cats
+
+
 def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 1. Test fallback when linked to .env.example (placeholder GEMINI_API_KEY)
     monkeypatch.setenv("ENV_FILE_PATH", str(FALLBACK_ENV_EXAMPLE))
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     demo = client.post("/api/v1/analyses/demo").json()
@@ -164,7 +257,6 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
     assert fb_payload["finding"]["review_priority_score"] == orig_score
     assert fb_payload["finding"]["category"] == orig_category
 
-    # 2. Test with Gemini configured via .env (mocked SDK call)
     if DEFAULT_ENV_FILE.is_file():
         monkeypatch.setenv("ENV_FILE_PATH", str(DEFAULT_ENV_FILE))
     mock_ai = AIExplanationSchema(
@@ -185,11 +277,9 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         live_data = inv_live.json()
         assert live_data["explanation"]["is_fallback"] is False
         assert live_data["explanation"]["provider"] == "gemini"
-        # Ensure AI never changes deterministic score or category (Check #18)
         assert live_data["finding"]["review_priority_score"] == second_score
         assert live_data["finding"]["category"] == second_cat
 
-    # 3. Test grounded chat with mocked Gemini
     mock_chat = ChatResponseSchema(
         answer="You should prioritize FND-001 and FND-002 first based on their review priority scores.",
         referenced_finding_ids=["FND-001", "FND-002"],
@@ -208,7 +298,6 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         chat_body = chat_res.json()["response"]
         assert "FND-001" in chat_body["referenced_finding_ids"]
 
-    # 4. Test investigation plan endpoint
     mock_plan = InvestigationPlanSchema(
         overview="Prioritized human verification plan.",
         steps=[
@@ -229,5 +318,3 @@ def test_gemini_fallback_and_configured_mock_preserve_deterministic_scores(
         plan_res = client.post(f"/api/v1/analyses/{analysis_id}/investigation-plan")
         assert plan_res.status_code == 200
         assert len(plan_res.json()["investigation_plan"]["steps"]) == 1
-
-

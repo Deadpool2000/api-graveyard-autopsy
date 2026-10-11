@@ -17,3 +17,7 @@ frontend/out/
 frontend/build/
 *.log
 .DS_Store
+data/
+*.db
+*.db-shm
+*.db-wal

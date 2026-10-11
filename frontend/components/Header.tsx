@@ -2,7 +2,7 @@
 
 import React from "react";
 import {
-  FileUp,
+  History,
   Loader2,
   Play,
   Terminal,
@@ -19,6 +19,7 @@ interface HeaderProps {
   onLoadDemo: () => void;
   onOpenUploadModal: () => void;
   onGoHome: () => void;
+  historyCount?: number;
 }
 
 export function Header({
@@ -29,6 +30,7 @@ export function Header({
   onLoadDemo,
   onOpenUploadModal,
   onGoHome,
+  historyCount = 0,
 }: HeaderProps) {
   const isCompleted = analysis?.status === "completed";
   const findingCount = analysis?.summary?.total_findings ?? 0;
@@ -86,8 +88,13 @@ export function Header({
                 onClick={onOpenUploadModal}
                 className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg text-sm font-medium bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border border-zinc-800 transition"
               >
-                <FileUp className="h-4 w-4 text-zinc-400" />
-                <span>New Upload</span>
+                <History className="h-4 w-4 text-zinc-400" />
+                <span>New Scan / History</span>
+                {historyCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-full text-xs font-mono bg-zinc-800 text-zinc-300">
+                    {historyCount}
+                  </span>
+                )}
               </button>
             )}
           </div>

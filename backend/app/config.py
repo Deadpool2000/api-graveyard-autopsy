@@ -130,9 +130,17 @@ class Settings:
         local_sample = Path(__file__).resolve().parents[1] / "sample-data"
         return local_sample
 
+    @property
+    def sqlite_db_path(self) -> Path:
+        raw_db = os.environ.get("SQLITE_DB_PATH", "").strip()
+        if raw_db:
+            return Path(raw_db)
+        return REPO_ROOT / "data" / "autopsy_history.db"
+
 
 def get_settings() -> Settings:
     """Return fresh settings instance linked to .env so updates are picked up immediately."""
     return Settings()
+
 
 

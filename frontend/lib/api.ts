@@ -30,6 +30,7 @@ export async function fetchServiceStatus(): Promise<{
   status: string;
   max_upload_size_mb: number;
   redis_connected: boolean;
+  sqlite_connected?: boolean;
   ai: {
     enabled: boolean;
     configured: boolean;
@@ -38,6 +39,30 @@ export async function fetchServiceStatus(): Promise<{
   };
 }> {
   const res = await fetch("/api/v1/status", { cache: "no-store" });
+  return handleResponse(res);
+}
+
+export async function fetchAnalysisHistory(limit: number = 30): Promise<{
+  total_count: number;
+  sqlite_connected: boolean;
+  analyses: AnalysisResponse[];
+}> {
+  const res = await fetch(`/api/v1/analyses?limit=${limit}`, {
+    cache: "no-store",
+  });
+  return handleResponse(res);
+}
+
+export async function deleteAnalysisRecord(analysisId: string): Promise<{
+  status: string;
+  analysis_id: string;
+}> {
+  const res = await fetch(
+    `/api/v1/analyses/${encodeURIComponent(analysisId)}`,
+    {
+      method: "DELETE",
+    }
+  );
   return handleResponse(res);
 }
 
@@ -54,6 +79,32 @@ export async function createCustomAnalysis(formData: FormData): Promise<Analysis
     body: formData,
   });
   return handleResponse<AnalysisResponse>(res);
+}
+
+export async function createLiveAnalysis(formData: FormData): Promise<AnalysisResponse> {
+  const res = await fetch("/api/v1/analyses/live", {
+    method: "POST",
+    body: formData,
+  });
+  return handleResponse<AnalysisResponse>(res);
+}
+
+export async function simulateLiveTraffic(
+  targetBaseUrl: string = "http://target-api:8090"
+): Promise<{
+  status: string;
+  added_requests: number;
+  total_logs: number;
+  message: string;
+  resolved_base_url?: string;
+}> {
+  const formData = new FormData();
+  formData.append("target_base_url", targetBaseUrl);
+  const res = await fetch("/api/v1/analyses/live/simulate-traffic", {
+    method: "POST",
+    body: formData,
+  });
+  return handleResponse(res);
 }
 
 export async function fetchAnalysis(analysisId: string): Promise<AnalysisResponse> {
@@ -170,4 +221,3 @@ export function getReportDownloadUrl(
 ): string {
   return `/api/v1/analyses/${encodeURIComponent(analysisId)}/report?format=${format}`;
 }
-
